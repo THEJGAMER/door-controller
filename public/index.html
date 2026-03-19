@@ -36,6 +36,7 @@
       <li class="nav-item"><a class="nav-link" href="#" data-tab="cards"><i class="bi bi-person-vcard me-2"></i> Cards & Users</a></li>
       <li class="nav-item"><a class="nav-link" href="#" data-tab="door-groups"><i class="bi bi-collection me-2"></i> Door Groups</a></li>
       <li class="nav-item"><a class="nav-link" href="#" data-tab="events"><i class="bi bi-list-check me-2"></i> Event History</a></li>
+      <li class="nav-item"><a class="nav-link" href="#" data-tab="debug"><i class="bi bi-terminal me-2"></i> System Debug</a></li>
       <li class="nav-item"><a class="nav-link" href="#" data-tab="settings"><i class="bi bi-gear me-2"></i> Settings</a></li>
       <li class="nav-item mt-auto"><a class="nav-link text-danger" href="/logout"><i class="bi bi-box-arrow-left me-2"></i> Logout</a></li>
     </ul>
@@ -110,6 +111,57 @@
     <div id="tab-events" class="tab-pane-content d-none">
         <div class="row mb-3"><div class="col-md-4"><select class="form-select" id="select-event-controller"><option value="">Select Controller...</option></select></div><div class="col-md-2"><button class="btn btn-success w-100" onclick="window.fetchControllerHistory()">Fetch Logs</button></div></div>
         <div class="card"><div class="card-body p-0"><div class="table-responsive"><table class="table table-sm table-striped"><thead class="table-dark"><tr><th>Time</th><th>Type</th><th>Card</th><th>Door</th><th>Result</th></tr></thead><tbody id="table-events-history"></tbody></table></div></div></div>
+    </div>
+
+    <div id="tab-debug" class="tab-pane-content d-none">
+      <div class="row">
+        <div class="col-md-4">
+          <div class="card">
+            <div class="card-header">Command Tester</div>
+            <div class="card-body">
+              <div class="mb-3">
+                <label class="small fw-bold">Target Controller</label>
+                <select id="debug-controller" class="form-select"><option value="">Search Broadcast</option></select>
+              </div>
+              <div class="mb-3">
+                <label class="small fw-bold">Select Command</label>
+                <select id="debug-command" class="form-select" onchange="window.onDebugCommandChange(this.value)">
+                  <option value="">-- Select --</option>
+                  <optgroup label="Device">
+                    <option value="getDevices">Discovery (Broadcast)</option>
+                    <option value="getDevice">Get Device Info</option>
+                    <option value="getStatus">Get Status</option>
+                    <option value="getTime">Get Time</option>
+                  </optgroup>
+                  <optgroup label="Doors">
+                    <option value="openDoor">Open Door</option>
+                    <option value="getDoorControl">Get Door Config</option>
+                    <option value="setDoorControl">Set Door Config</option>
+                  </optgroup>
+                  <optgroup label="Cards">
+                    <option value="getCards">Get Card Count</option>
+                    <option value="getCard">Get Card by Number</option>
+                    <option value="getCardByIndex">Get Card by Index</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div id="debug-params" class="mb-3"></div>
+              <button class="btn btn-primary w-100" onclick="window.executeDebugCommand()">Execute Raw Command</button>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-8">
+          <div class="card">
+            <div class="card-header d-flex justify-content-between">
+              Comms Console
+              <button class="btn btn-sm btn-link py-0" onclick="document.getElementById('debug-console').innerHTML=''">Clear</button>
+            </div>
+            <div class="card-body p-0">
+              <pre id="debug-console" style="height: 500px; overflow-y: auto; background: #1a1a1a; color: #00ff00; padding: 15px; margin: 0; font-size: 0.8rem;"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div id="tab-settings" class="tab-pane-content d-none">
@@ -218,6 +270,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

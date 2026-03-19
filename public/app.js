@@ -84,6 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (t === 'controllers') await window.refreshControllers();
             if (t === 'cards') await refreshCards();
             if (t === 'door-groups') await refreshDoorGroups();
+            if (t === 'debug') await refreshDebug();
             if (t === 'events') await refreshEvents();
             if (t === 'settings') await refreshSettings();
         } catch (e) {
@@ -398,6 +399,84 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             renderHistory(logs);
         } finally { showLoader(false); }
+    };
+
+    // Debug
+    const refreshDebug = async () => {
+        state.config = await api('/api/getConfig');
+        const s = document.getElementById('debug-controller');
+        if (!s) return;
+        s.innerHTML = '<option value="">(Network Broadcast)</option>';
+        state.config.controllers.forEach(c => s.add(new Option(`${c.name || 'Unnamed'} (${c.deviceId})`, c.deviceId)));
+    };
+
+    window.onDebugCommandChange = (cmd) => {
+        const p = document.getElementById('debug-params');
+        p.innerHTML = '';
+        if (cmd === 'getDevice' || cmd === 'getStatus' || cmd === 'getTime' || cmd === 'getCards') {
+            // No extra params needed beyond ID
+        } else if (cmd === 'openDoor' || cmd === 'getDoorControl') {
+            p.innerHTML = '<label class="x-small fw-bold">Door (1-4)</label><input type="number" id="dbg-door" class="form-control form-control-sm" value="1">';
+        } else if (cmd === 'setDoorControl') {
+            p.innerHTML = `
+                <label class="x-small fw-bold">Door (1-4)</label><input type="number" id="dbg-door" class="form-control form-control-sm mb-1" value="1">
+                <label class="x-small fw-bold">Delay (sec)</label><input type="number" id="dbg-delay" class="form-control form-control-sm mb-1" value="5">
+                <label class="x-small fw-bold">Mode</label><select id="dbg-mode" class="form-select form-select-sm"><option value="controlled">controlled</option><option value="normally open">normally open</option><option value="normally closed">normally closed</option></select>`;
+        } else if (cmd === 'getCard') {
+            p.innerHTML = '<label class="x-small fw-bold">Card Number</label><input type="number" id="dbg-card" class="form-control form-control-sm" required>';
+        } else if (cmd === 'getCardByIndex') {
+            p.innerHTML = '<label class="x-small fw-bold">Record Index</label><input type="number" id="dbg-index" class="form-control form-control-sm" required>';
+        }
+    };
+
+    window.executeDebugCommand = async () => {
+        const cmd = document.getElementById('debug-command').value;
+        const ctrlId = document.getElementById('debug-controller').value;
+        const consoleEl = document.getElementById('debug-console');
+        if (!cmd) return alert('Select a command');
+
+        const log = (msg, type = 'info') => {
+            const time = new Date().toLocaleTimeString();
+            const color = type === 'error' ? '#ff4444' : (type === 'sent' ? '#44aaff' : '#00ff00');
+            consoleEl.innerHTML += `<div style="color:${color}">[${time}] ${msg}</div>`;
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        };
+
+        let url = `/api/${cmd}`;
+        let method = 'GET';
+        let body = null;
+
+        if (cmd === 'getDevices') {
+            url = '/api/getDevices';
+        } else if (['getDevice', 'getStatus', 'getTime', 'getCards'].includes(cmd)) {
+            if (!ctrlId) return alert('Select a controller');
+            url = `/api/${cmd}/${ctrlId}`;
+        } else if (cmd === 'openDoor') {
+            if (!ctrlId) return alert('Select a controller');
+            method = 'POST';
+            body = { deviceId: ctrlId, door: document.getElementById('dbg-door').value };
+        } else if (cmd === 'getDoorControl') {
+            if (!ctrlId) return alert('Select a controller');
+            url = `/api/getDoorControl/${ctrlId}/${document.getElementById('dbg-door').value}`;
+        } else if (cmd === 'setDoorControl') {
+            if (!ctrlId) return alert('Select a controller');
+            method = 'POST';
+            body = { deviceId: ctrlId, door: document.getElementById('dbg-door').value, delay: document.getElementById('dbg-delay').value, control: document.getElementById('dbg-mode').value };
+        } else if (cmd === 'getCard') {
+            if (!ctrlId) return alert('Select a controller');
+            url = `/api/getCard/${ctrlId}/${document.getElementById('dbg-card').value}`;
+        } else if (cmd === 'getCardByIndex') {
+            if (!ctrlId) return alert('Select a controller');
+            url = `/api/getCardByIndex/${ctrlId}/${document.getElementById('dbg-index').value}`;
+        }
+
+        log(`SENDING: ${method} ${url} ${body ? JSON.stringify(body) : ''}`, 'sent');
+        try {
+            const res = await api(url, method, body);
+            log(`RECEIVED: ${JSON.stringify(res, null, 2)}`);
+        } catch (e) {
+            log(`ERROR: ${e.message}`, 'error');
+        }
     };
 
     // Settings
