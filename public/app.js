@@ -347,35 +347,112 @@ document.addEventListener('DOMContentLoaded', () => {
     const refreshEvents = async () => {
         const s = document.getElementById('select-event-controller');
         if (!s) return;
-        s.innerHTML = '<option value="">Select...</option>';
-        state.config.controllers.forEach(c => s.add(new Option(c.name, c.deviceId)));
+        s.innerHTML = '<option value="all">All Controllers</option>';
+        state.config.controllers.forEach(c => s.add(new Option(c.name || `CTRL ${c.deviceId}`, c.deviceId)));
+        
+        // Show current DB history first
         const hist = await api('/api/eventHistory');
         renderHistory(hist);
+
+        // Then automatically trigger a fresh fetch from hardware
+        console.log('Auto-fetching fresh logs...');
+        window.fetchControllerHistory();
     };
     const renderHistory = (h) => {
         const tbody = document.getElementById('table-events-history'); 
         if (!tbody) return;
         tbody.innerHTML = '';
-        h.forEach(ev => {
+        const sorted = h.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+        sorted.forEach(ev => {
             const tr = document.createElement('tr');
-            const type = getText(ev.eventType || ev.type);
-            tr.innerHTML = `<td>${ev.timestamp}</td><td>${type||'Access'}</td><td>${ev.cardNumber||'-'}</td><td>${ev.door}</td><td><span class="badge ${ev.granted?'bg-success':'bg-danger'}">${ev.granted?'YES':'NO'}</span></td>`;
+            const rawType = getText(ev.eventType || ev.type);
+            const rawReason = getText(ev.reason).toLowerCase();
+            
+            // Classify event
+            let classification = 'Sensor';
+            let badgeClass = 'bg-secondary';
+            let icon = 'bi-door-closed';
+
+            const isSwipe = rawType.toLowerCase().includes('swipe') || 
+                           (ev.cardNumber > 100) || 
+                           rawReason.includes('card');
+
+            if (isSwipe) {
+                classification = 'Swipe';
+                badgeClass = ev.granted ? 'bg-success' : 'bg-danger';
+                icon = 'bi-person-vcard';
+            } else {
+                classification = 'Sensor';
+                badgeClass = 'bg-info';
+                icon = 'bi-broadcast';
+            }
+
+            let resultHtml = `<span class="badge ${ev.granted?'bg-success':'bg-danger'} shadow-sm">${ev.granted?'GRANTED':'DENIED'}</span>`;
+            if (classification === 'Sensor') {
+                const isLock = rawReason.includes('lock') || rawReason.includes('relay') || rawReason.includes('unlocked');
+                const isOpen = rawReason.includes('opened') || rawReason.includes('open');
+                const isClosed = rawReason.includes('closed');
+
+                if (isLock) {
+                    resultHtml = `<span class="badge ${ev.granted || rawReason.includes('unlocked') ? 'bg-danger' : 'bg-success'} shadow-sm">${(ev.granted || rawReason.includes('unlocked')) ? 'UNLOCKED' : 'LOCKED'}</span>`;
+                } else if (isOpen) {
+                    resultHtml = `<span class="badge bg-warning text-dark shadow-sm">OPEN</span>`;
+                } else if (isClosed) {
+                    resultHtml = `<span class="badge bg-info shadow-sm">CLOSED</span>`;
+                }
+            }
+
+            const cleanReason = getText(ev.reason).replace(/[{}]/g, '').toUpperCase();
+            const reasonCode = (ev.reason && ev.reason.code) ? ev.reason.code : (ev.type && ev.type.code ? ev.type.code : '-');
+
+            tr.innerHTML = `
+                <td><small class="text-muted fw-bold">${ev.timestamp}</small></td>
+                <td>
+                    <div class="d-flex align-items-center">
+                        <span class="badge ${badgeClass} me-2"><i class="bi ${icon} me-1"></i> ${classification}</span>
+                        <span class="badge bg-dark-subtle text-muted border" style="font-size:0.6rem">CODE ${reasonCode}</span>
+                    </div>
+                    <small class="text-secondary d-block mt-1" style="font-size:0.7rem">${rawType}</small>
+                </td>
+                <td><span class="font-monospace">${ev.cardNumber || '-'}</span></td>
+                <td><span class="badge bg-light text-dark border">D${ev.door}</span> <small class="text-muted">ID:${ev.deviceId}</small></td>
+                <td>
+                    <div class="d-flex flex-column align-items-start">
+                        ${resultHtml}
+                        <small class="text-uppercase fw-bold text-muted mt-1" style="font-size:0.65rem"><i class="bi bi-info-circle me-1"></i>${cleanReason}</small>
+                    </div>
+                </td>
+            `;
             tbody.appendChild(tr);
         });
     };
     window.fetchControllerHistory = async () => {
-        const id = document.getElementById('select-event-controller').value;
-        if (!id) return;
+        const val = document.getElementById('select-event-controller').value;
         showLoader(true);
         try {
-            const meta = await api(`/api/getEvents/${id}`);
-            const logs = [];
-            for (let i=meta.last; i>=Math.max(meta.first, meta.last-30); i--) {
-                try { const { event: e } = await api(`/api/getEvent/${id}/${i}`); logs.push({ timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted }); } catch (ex){}
+            const targets = val === 'all' ? state.config.controllers.map(c => c.deviceId) : [val];
+            let allLogs = [];
+            for (const id of targets) {
+                try {
+                    const meta = await api(`/api/getEvents/${id}`);
+                    for (let i=meta.last; i>=Math.max(meta.first, meta.last-20); i--) {
+                        try { 
+                            const { event: e } = await api(`/api/getEvent/${id}/${i}`); 
+                            allLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); 
+                        } catch (ex){}
+                    }
+                } catch (err) {}
             }
-            renderHistory(logs);
+            
+            // Persist the fetched events to the DB
+            if (allLogs.length > 0) {
+                await api('/api/saveEvents', 'POST', allLogs);
+            }
+
+            renderHistory(allLogs);
         } finally { showLoader(false); }
     };
+
 
     // Debug
     const refreshDebug = async () => {

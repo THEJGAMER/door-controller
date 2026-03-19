@@ -27,8 +27,11 @@ db.exec(`
     cardNumber INTEGER,
     door INTEGER,
     granted INTEGER,
-    eventType TEXT
+    eventType TEXT,
+    reason TEXT
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events (timestamp, deviceId, cardNumber, door, eventType);
+  
   CREATE TABLE IF NOT EXISTS door_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE
@@ -48,6 +51,32 @@ db.exec(`
     PRIMARY KEY(cardNumber, groupId)
   );
 `);
+
+// Helper to save event to DB (deduplicated)
+function saveEventToDb(ev) {
+  try {
+    const extractText = (v) => {
+      if (!v) return '';
+      if (typeof v === 'string') return v.replace(/[{}]/g, '');
+      if (typeof v === 'object') return (v.state || v.event || v.reason || v.value || JSON.stringify(v)).replace(/[{}]/g, '');
+      return String(v);
+    };
+
+    db.prepare(`
+      INSERT OR IGNORE INTO events 
+      (timestamp, deviceId, cardNumber, door, granted, eventType, reason) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ev.timestamp || new Date().toISOString().replace('T', ' ').split('.')[0],
+      Number(ev.deviceId),
+      ev.cardNumber || ev.card || 0,
+      ev.door || 0,
+      ev.granted ? 1 : 0,
+      extractText(ev.eventType || ev.type || 'Access'),
+      extractText(ev.reason || '')
+    );
+  } catch (e) { console.error('DB Save Error', e); }
+}
 
 // Helper to get/set settings
 function getSetting(key, defaultValue) {
@@ -332,6 +361,12 @@ app.post('/api/deprovisionCard', wrap(async (req) => {
   return { results };
 }));
 
+app.post('/api/saveEvents', (req, res) => {
+  const events = Array.isArray(req.body) ? req.body : [req.body];
+  events.forEach(saveEventToDb);
+  res.json({ success: true });
+});
+
 // Background Listen
 const liveEvents = [];
 app.get('/api/liveEvents', (req, res) => res.json(liveEvents));
@@ -341,6 +376,7 @@ app.get('/api/eventHistory', (req, res) => {
 });
 
 uhppoted.listen(ctx, (event) => {
+  console.log('[UDP EVENT]', JSON.stringify(event));
   // Normalize event for frontend/DB
   const normalized = {
     deviceId: event.deviceId,
@@ -349,12 +385,11 @@ uhppoted.listen(ctx, (event) => {
     eventType: event.eventType || (event.state && event.state.event ? event.state.event.type : 'status'),
     cardNumber: event.cardNumber || (event.state && event.state.event ? event.state.event.card : 0),
     granted: event.granted || (event.state && event.state.event ? event.state.event.granted : false),
-    // Include full state if available (from 0x20 status packets)
+    reason: event.reason || (event.state && event.state.event ? event.state.event.reason : ''),
     doorStates: event.state ? event.state.doors : null,
     relayStates: (event.state && event.state.relays) ? event.state.relays.relays : null
   };
 
-  // If normalized missing timestamp, try to find it in nested state
   if (!normalized.timestamp && event.state && event.state.event) {
     normalized.timestamp = event.state.event.timestamp;
     normalized.door = event.state.event.door;
@@ -362,11 +397,7 @@ uhppoted.listen(ctx, (event) => {
 
   liveEvents.push(normalized);
   if (liveEvents.length > 50) liveEvents.shift();
-
-  try {
-    db.prepare('INSERT INTO events (timestamp, deviceId, cardNumber, door, granted, eventType) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(normalized.timestamp || new Date().toISOString(), normalized.deviceId, normalized.cardNumber, normalized.door || 0, normalized.granted ? 1 : 0, String(normalized.eventType));
-  } catch (e) { console.error('DB Event Save Error', e); }
+  saveEventToDb(normalized);
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
