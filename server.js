@@ -61,18 +61,40 @@ const oidcConfig = {
   authRequired: true,
   auth0Logout: false,
   idpLogout: true,
+  backchannelLogout: true,
   secret: process.env.OIDC_SECRET,
   baseURL: process.env.BASE_URL,
   clientID: process.env.OIDC_CLIENT_ID,
   issuerBaseURL: process.env.OIDC_ISSUER_URL,
   clientSecret: process.env.OIDC_CLIENT_SECRET,
   authorizationParams: { response_type: 'code', response_mode: 'form_post', scope: 'openid profile email' },
-  session: { name: 'appSession', cookie: { secure: true, sameSite: 'Lax' } },
+  session: { 
+    name: 'appSession', 
+    absoluteDuration: 3600, 
+    rolling: true, 
+    rollingDuration: 900,
+    cookie: { secure: true, sameSite: 'Lax' } 
+  },
 };
 
 app.use((req, res, next) => {
   if (['/favicon.ico', '/app.js', '/index.html'].some(p => req.path === p)) return next();
   auth(oidcConfig)(req, res, next);
+});
+
+app.use(async (req, res, next) => {
+  if (req.oidc && req.oidc.isAuthenticated()) {
+    try {
+      const lastCheck = req.appSession.lastSync || 0;
+      if (Date.now() - lastCheck > 60000) {
+        await req.oidc.fetchUserInfo();
+        req.appSession.lastSync = Date.now();
+      }
+    } catch (e) {
+      return res.redirect('/logout');
+    }
+  }
+  next();
 });
 
 function getUhppoteConfig() {
