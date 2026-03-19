@@ -39,6 +39,14 @@ db.exec(`
     door INTEGER,
     PRIMARY KEY(groupId, deviceId, door)
   );
+  CREATE TABLE IF NOT EXISTS card_group_assignments (
+    cardNumber INTEGER,
+    groupId INTEGER,
+    pin INTEGER,
+    validFrom TEXT,
+    validTo TEXT,
+    PRIMARY KEY(cardNumber, groupId)
+  );
 `);
 
 // Helper to get/set settings
@@ -76,6 +84,7 @@ const oidcConfig = {
   clientSecret: process.env.OIDC_CLIENT_SECRET,
   authorizationParams: {
     response_type: 'code',
+    response_mode: 'form_post',
     scope: 'openid profile email',
   },
   session: {
@@ -167,7 +176,6 @@ app.post('/api/updateController', wrap(async (req) => {
 
 app.post('/api/setDoorControl', wrap(async (req) => {
   const { deviceId, door, control, delay } = req.body;
-  // Signature: (ctx, controller, door, delay, mode)
   return await uhppoted.setDoorControl(ctx, Number(deviceId), Number(door), Number(delay), control);
 }));
 
@@ -209,11 +217,17 @@ app.get('/api/getCard/:id/:cardNumber', wrap(async (req) => await uhppoted.getCa
 app.get('/api/getCardByIndex/:id/:index', wrap(async (req) => await uhppoted.getCardByIndex(ctx, Number(req.params.id), Number(req.params.index))));
 app.post('/api/putCard', wrap(async (req) => {
   const { deviceId, cardNumber, from, to, door1, door2, door3, door4, pin } = req.body;
+  const mapPermission = (p) => {
+    const v = Number(p);
+    if (v === 0) return false;
+    if (v === 1) return true;
+    return v;
+  };
   const doors = {
-    1: Number(door1),
-    2: Number(door2),
-    3: Number(door3),
-    4: Number(door4)
+    1: mapPermission(door1),
+    2: mapPermission(door2),
+    3: mapPermission(door3),
+    4: mapPermission(door4)
   };
   return await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doors, Number(pin));
 }));
@@ -262,27 +276,59 @@ app.delete('/api/doorGroups/:id', (req, res) => {
 });
 
 app.post('/api/provisionCard', wrap(async (req) => {
-  const { groupId, cardNumber, from, to, pin } = req.body;
-  const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(groupId);
-  
-  // Group members by deviceId
-  const deviceDoors = {};
-  members.forEach(m => {
-    if (!deviceDoors[m.deviceId]) deviceDoors[m.deviceId] = [];
-    deviceDoors[m.deviceId].push(m.door);
-  });
-
+  const { groupIds, cardNumber, from, to, pin } = req.body;
+  const targetGroups = Array.isArray(groupIds) ? groupIds : [groupIds];
   const results = [];
-  for (const [deviceId, doors] of Object.entries(deviceDoors)) {
-    const doorMap = { 1: 0, 2: 0, 3: 0, 4: 0 };
-    doors.forEach(d => doorMap[d] = 1);
+
+  for (const groupId of targetGroups) {
+    db.prepare('INSERT OR REPLACE INTO card_group_assignments (cardNumber, groupId, pin, validFrom, validTo) VALUES (?, ?, ?, ?, ?)')
+      .run(Number(cardNumber), Number(groupId), Number(pin), from, to);
+
+    const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(groupId);
+    const deviceDoors = {};
+    members.forEach(m => {
+      if (!deviceDoors[m.deviceId]) deviceDoors[m.deviceId] = [];
+      deviceDoors[m.deviceId].push(m.door);
+    });
+
+    for (const [deviceId, doors] of Object.entries(deviceDoors)) {
+      const doorMap = { 1: false, 2: false, 3: false, 4: false };
+      doors.forEach(d => doorMap[d] = true);
+      try {
+        await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doorMap, Number(pin));
+        results.push({ groupId, deviceId, success: true });
+      } catch (e) {
+        results.push({ groupId, deviceId, success: false, error: e.message });
+      }
+    }
+  }
+  return { results };
+}));
+
+app.get('/api/assignments', (req, res) => {
+  const rows = db.prepare(`
+    SELECT a.*, g.name as groupName 
+    FROM card_group_assignments a 
+    JOIN door_groups g ON a.groupId = g.id
+  `).all();
+  res.json(rows);
+});
+
+app.post('/api/deprovisionCard', wrap(async (req) => {
+  const { groupId, cardNumber } = req.body;
+  const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(groupId);
+  const deviceIdList = [...new Set(members.map(m => m.deviceId))];
+  const results = [];
+  for (const deviceId of deviceIdList) {
     try {
-      await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doorMap, Number(pin));
+      await uhppoted.deleteCard(ctx, Number(deviceId), Number(cardNumber));
       results.push({ deviceId, success: true });
     } catch (e) {
       results.push({ deviceId, success: false, error: e.message });
     }
   }
+  db.prepare('DELETE FROM card_group_assignments WHERE cardNumber = ? AND groupId = ?')
+    .run(Number(cardNumber), Number(groupId));
   return { results };
 }));
 
@@ -297,7 +343,6 @@ app.get('/api/eventHistory', (req, res) => {
 uhppoted.listen(ctx, (event) => {
   liveEvents.push(event);
   if (liveEvents.length > 50) liveEvents.shift();
-  // Persist to DB
   try {
     db.prepare('INSERT INTO events (timestamp, deviceId, cardNumber, door, granted, eventType) VALUES (?, ?, ?, ?, ?, ?)')
       .run(event.timestamp, event.deviceId, event.cardNumber, event.door, event.granted ? 1 : 0, event.eventType || 'Access');
