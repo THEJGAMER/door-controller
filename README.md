@@ -47,7 +47,20 @@ git clone https://github.com/your-repo/door-control-pro.git .
 npm install
 ```
 
-### 2. Configure Settings
+### 2. Configure OIDC Provider (Keycloak)
+For the authentication to function correctly, your OIDC client must be configured with the following settings:
+
+*   **Client ID**: Match your `.env` `OIDC_CLIENT_ID` (e.g., `door-control-pro`).
+*   **Client Authentication**: `On` (Confidential Client).
+*   **Authentication Flow**: Standard Flow (Authorization Code Flow) enabled. Implicit Flow disabled.
+*   **Valid Redirect URIs**: `https://your-domain.com/callback` (Must be absolute).
+*   **Valid Post Logout Redirect URIs**: `https://your-domain.com/`
+*   **Web Origins**: `https://your-domain.com` (Required for CORS/WebSockets).
+*   **Back-Channel Logout URL**: `https://your-domain.com/backchannel-logout` (If using the OIDC library's native handler).
+*   **Advanced Settings**:
+    *   **Response Mode**: `form_post` (This is required for large token payloads behind Nginx/Cloudflare).
+
+### 3. Configure Environment Settings
 | Variable | Description |
 | :--- | :--- |
 | `BASE_URL` | The external HTTPS URL of your application. |
