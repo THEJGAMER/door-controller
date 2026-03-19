@@ -46,15 +46,22 @@ An enterprise-grade, real-time web management interface for UHPPOTE TCP/IP Wiega
 
 ## 🛠️ Installation & Setup
 
-1. **Clone and Install**:
+> [!IMPORTANT]
+> To use the included `door-controller.service` without modification, the application must be installed in `/opt/door-controller`.
+
+1. **Deployment**:
    ```bash
-   git clone https://github.com/your-repo/door-control-pro.git
-   cd door-control-pro
+   # Move the application to the standard directory
+   sudo mkdir -p /opt/door-controller
+   sudo cp -r . /opt/door-controller/
+   cd /opt/door-controller
+   
+   # Install dependencies
    npm install
    ```
 
 2. **Configure Environment**:
-   Create a `.env` file with your OIDC and Network settings.
+   Create a `/opt/door-controller/.env` file with your OIDC and Network settings.
 
 3. **Critical Nginx Configuration**:
    OIDC tokens and large hardware responses require expanded buffers. Add this to your `location /` block:
