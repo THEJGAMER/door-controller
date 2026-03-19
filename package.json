@@ -1,0 +1,17 @@
+{
+  "name": "door-controller-app",
+  "version": "1.0.0",
+  "description": "Door Controller Web App using uhppoted",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-openid-connect": "^2.17.0",
+    "morgan": "^1.10.0",
+    "uhppoted": "latest"
+  }
+}

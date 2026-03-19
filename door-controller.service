@@ -1,0 +1,14 @@
+[Unit]
+Description=Door Controller Web App
+After=network.target
+
+[Service]
+EnvironmentFile=/opt/door-controller/.env
+Environment=DEBUG=express-openid-connect
+WorkingDirectory=/opt/door-controller
+ExecStart=/usr/bin/npm start
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

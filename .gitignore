@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+bower_components/
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Environment/Secrets
+.env
+.env.local
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
