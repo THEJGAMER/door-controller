@@ -2,7 +2,7 @@
 > **WARNING: THIS PROJECT IS 100% VIBE CODED.**
 > This codebase was built in a fever dream of AI prompts and "it looks right" logic. 
 > If it works, it's a miracle. If it breaks your door controller, it's a vibe. 
-> Proceed with extreme caution and low expectations.
+> Proceed with extreme caution and low expectations..
 
 # DoorControl Pro 🛡️
 
