@@ -88,6 +88,16 @@ An enterprise-grade web management interface for UHPPOTE TCP/IP Wiegand Access C
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## 📚 Sources & Credits
+
+This project leverages several open-source libraries and was inspired by the following:
+
+- **[uhppoted-nodejs](https://github.com/uhppoted/uhppoted-nodejs)**: The core hardware driver for UHPPOTE controllers.
+- **[express-openid-connect](https://github.com/auth0/express-openid-connect)**: Express middleware for OIDC authentication.
+- **[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)**: High-performance SQLite3 library for Node.js.
+- **[uhppoted-app-home-assistant](https://github.com/uhppoted/uhppoted-app-home-assistant)**: Reference for advanced network configuration patterns.
+- **[Bootstrap](https://getbootstrap.com/)**: Frontend responsive framework.
+
 ## ⚖️ License
 
 Distributed under the MIT License. See `LICENSE` for more information.
