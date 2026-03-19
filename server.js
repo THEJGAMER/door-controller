@@ -341,11 +341,31 @@ app.get('/api/eventHistory', (req, res) => {
 });
 
 uhppoted.listen(ctx, (event) => {
-  liveEvents.push(event);
+  // Normalize event for frontend/DB
+  const normalized = {
+    deviceId: event.deviceId,
+    timestamp: event.timestamp,
+    door: event.door,
+    eventType: event.eventType || (event.state && event.state.event ? event.state.event.type : 'status'),
+    cardNumber: event.cardNumber || (event.state && event.state.event ? event.state.event.card : 0),
+    granted: event.granted || (event.state && event.state.event ? event.state.event.granted : false),
+    // Include full state if available (from 0x20 status packets)
+    doorStates: event.state ? event.state.doors : null,
+    relayStates: (event.state && event.state.relays) ? event.state.relays.relays : null
+  };
+
+  // If normalized missing timestamp, try to find it in nested state
+  if (!normalized.timestamp && event.state && event.state.event) {
+    normalized.timestamp = event.state.event.timestamp;
+    normalized.door = event.state.event.door;
+  }
+
+  liveEvents.push(normalized);
   if (liveEvents.length > 50) liveEvents.shift();
+
   try {
     db.prepare('INSERT INTO events (timestamp, deviceId, cardNumber, door, granted, eventType) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(event.timestamp, event.deviceId, event.cardNumber, event.door, event.granted ? 1 : 0, event.eventType || 'Access');
+      .run(normalized.timestamp || new Date().toISOString(), normalized.deviceId, normalized.cardNumber, normalized.door || 0, normalized.granted ? 1 : 0, String(normalized.eventType));
   } catch (e) { console.error('DB Event Save Error', e); }
 });
 
