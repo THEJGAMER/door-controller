@@ -278,6 +278,11 @@ app.post('/api/deprovisionCard', wrap(async (req) => {
 }));
 app.post('/api/saveEvents', (req, res) => { (Array.isArray(req.body) ? req.body : [req.body]).forEach(saveEventToDb); res.json({ success: true }); });
 
+app.get('/api/lastEventIndex/:id', (req, res) => {
+  const row = db.prepare('SELECT MAX(id) as lastId FROM events WHERE deviceId = ?').get(Number(req.params.id));
+  res.json({ lastId: row ? row.lastId : 0 });
+});
+
 const liveEvents = [];
 app.get('/api/liveEvents', (req, res) => res.json(liveEvents));
 app.get('/api/eventHistory', (req, res) => res.json(db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 100').all()));

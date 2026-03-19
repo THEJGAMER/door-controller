@@ -423,19 +423,28 @@ document.addEventListener('DOMContentLoaded', () => {
         showLoader(true);
         try {
             const targets = val === 'all' ? state.config.controllers.map(c => c.deviceId) : [val];
-            let allLogs = [];
+            let allNewLogs = [];
             for (const id of targets) {
                 try {
                     const meta = await api(`/api/getEvents/${id}`);
+                    // Only fetch the gap or last 20 if many missing
                     for (let i=meta.last; i>=Math.max(meta.first, meta.last-20); i--) {
-                        try { const { event: e } = await api(`/api/getEvent/${id}/${i}`); allLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); } catch (ex){}
+                        try { 
+                            const { event: e } = await api(`/api/getEvent/${id}/${i}`); 
+                            allNewLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); 
+                        } catch (ex){}
                     }
                 } catch (err) {}
             }
-            if (allLogs.length > 0) { await api('/api/saveEvents', 'POST', allLogs); }
-            renderHistory(allLogs);
+            if (allNewLogs.length > 0) { 
+                await api('/api/saveEvents', 'POST', allNewLogs); 
+                // Final render from DB to ensure unified view
+                const hist = await api('/api/eventHistory');
+                renderHistory(hist);
+            }
         } finally { showLoader(false); }
     };
+
 
     // Debug
     const refreshDebug = async () => {
