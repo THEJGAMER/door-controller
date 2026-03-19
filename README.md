@@ -11,89 +11,119 @@ An enterprise-grade, real-time web management interface for UHPPOTE TCP/IP Wiega
 ## 🚀 Key Features
 
 ### ⚡ Real-Time Operations
-- **Instant WebSocket Updates**: Powered by **Socket.io**. The server pushes hardware events to your browser the millisecond they happen—no more waiting for page refreshes.
-- **Live Door Status**: Visual badges for **Locked/Unlocked** (relay state) and **Open/Closed** (magnetic sensor) that react in true real-time.
-- **Event-Driven UI**: Zero-latency feedback loop between the physical door and the management dashboard.
+- **Instant WebSocket Updates**: Powered by **Socket.io**. The server pushes hardware events to your browser the millisecond they happen.
+- **Live Door Status**: Visual badges for **Locked/Unlocked** and **Open/Closed** that react in true real-time.
 
 ### 🏢 Site-Wide Management
-- **🌐 Door Groups & Site Provisioning**: Group doors across multiple controllers (e.g., "Ground Floor", "Data Center") and provision cards to an entire site in one click.
-- **🔍 Searchable Search**: Integrated **Tom Select** for powerful, searchable multi-group selection when managing user access.
-- **💾 Persistent SQLite Backend**: All controller metadata, custom names, door groups, and network settings are saved permanently in a local database.
-
-### 📊 Advanced Audit & Diagnostics
-- **Unified Event History**: Automatically aggregates and merges logs from all controllers into a single chronological audit trail.
-- **Smart Classification**: Intelligently distinguishes between **Card Swipes** (Access) and **Sensor Events** (Hardware status changes) with distinct icons and color-coding.
-- **Hardware Diagnostics**: A dedicated **System Debug** page to send raw commands directly to controllers and inspect the underlying JSON responses.
+- **🌐 Door Groups & Site Provisioning**: Group doors across multiple controllers and provision cards to an entire site in one click.
+- **💾 Persistent SQLite Backend**: All metadata, door groups, and settings are saved in a local permanent database.
 
 ### 🔐 Security & Reliability
-- **Enterprise Auth**: Seamless **OIDC (Keycloak)** integration for secure administrator access.
-- **Smart Probing**: Continually verifies controller health across subnets, providing reliable Online/Offline status indicators.
-- **Auto-Sync Config**: Every time a controller's detail panel is opened, the app verifies the **actual hardware configuration** (Delay/Mode) to ensure the UI is never stale.
-
-## 🏗️ Architecture
-
-- **Backend**: Node.js, Express, Socket.io, `uhppoted` UDP driver.
-- **Database**: SQLite (`better-sqlite3`) for high-concurrency persistence.
-- **Frontend**: Vanilla JS (ES6+), WebSockets, Bootstrap 5, Tom Select.
-- **Proxy**: Nginx configured for WebSocket passthrough and large OIDC token support.
-
-## 📋 Prerequisites
-
-- **UHPPOTE Controllers** (1, 2, or 4-door models).
-- **Node.js** v18+
-- **Keycloak** or another OIDC provider.
-- **Nginx** (for reverse proxy, SSL, and WebSocket support).
-
-## 🛠️ Installation & Setup
-
-> [!IMPORTANT]
-> To use the included `door-controller.service` without modification, the application must be installed in `/opt/door-controller`.
-
-1. **Deployment**:
-   ```bash
-   # Move the application to the standard directory
-   sudo mkdir -p /opt/door-controller
-   sudo cp -r . /opt/door-controller/
-   cd /opt/door-controller
-   
-   # Install dependencies
-   npm install
-   ```
-
-2. **Configure Environment**:
-   Create a `/opt/door-controller/.env` file with your OIDC and Network settings.
-
-3. **Critical Nginx Configuration**:
-   OIDC tokens and large hardware responses require expanded buffers. Add this to your `location /` block:
-   ```nginx
-   proxy_buffer_size          128k;
-   proxy_buffers              4 256k;
-   proxy_busy_buffers_size    256k;
-   proxy_http_version         1.1;
-   proxy_set_header           Upgrade $http_upgrade;
-   proxy_set_header           Connection "upgrade";
-   ```
-
-4. **Deploy**:
-   ```bash
-   sudo cp door-controller.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now door-controller
-   ```
-
-## 📚 Sources & Credits
-
-This project leverages several open-source libraries:
-
-- **[uhppoted-nodejs](https://github.com/uhppoted/uhppoted-nodejs)**: The core hardware driver.
-- **[Socket.io](https://socket.io/)**: Real-time event engine.
-- **[express-openid-connect](https://github.com/auth0/express-openid-connect)**: OIDC middleware.
-- **[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)**: High-performance persistence.
-- **[Tom Select](https://tom-select.js.org/)**: Searchable select UI.
-
-## ⚖️ License
-
-Distributed under the MIT License. See `LICENSE` for more information.
+- **Enterprise Auth**: Seamless **OIDC (Keycloak)** integration.
+- **Smart Probing**: Continually verifies controller health across subnets.
 
 ---
-*Disclaimer: This software is provided "as is" without warranty of any kind. Use extreme caution when remotely reconfiguring hardware parameters.*
+
+## 🛠️ Detailed Installation Guide
+
+Follow these steps to deploy DoorControl Pro on a fresh Debian/Ubuntu server.
+
+### 1. Prepare the Environment
+The application is pre-configured to run from `/opt/door-controller`.
+
+```bash
+# Create the directory and set permissions
+sudo mkdir -p /opt/door-controller
+sudo chown $USER:$USER /opt/door-controller
+cd /opt/door-controller
+
+# Clone the repository
+git clone https://github.com/your-repo/door-control-pro.git .
+
+# Install Node.js dependencies
+npm install
+```
+
+### 2. Configure Settings
+Create your environment file. This is where you link your OIDC provider (Keycloak) and define your network.
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+**Required Fields in `.env`:**
+*   `BASE_URL`: Your public domain (e.g., `https://acs.yourdomain.com`)
+*   `OIDC_ISSUER_URL`: Your Keycloak realm URL.
+*   `OIDC_CLIENT_ID`: The Client ID created in Keycloak.
+*   `OIDC_CLIENT_SECRET`: The secret from Keycloak.
+*   `UHPPOTE_BROADCAST`: Your local subnet broadcast (e.g., `192.168.1.255:60000`)
+
+### 3. Setup Nginx (Reverse Proxy)
+Nginx is required to handle SSL and the large data packets used by OIDC.
+
+```bash
+sudo nano /etc/nginx/sites-available/door-controller
+```
+
+**Paste this configuration (Replace `your-domain.com`):**
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
+
+    # SSL Config (Certbot recommended)
+    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        
+        # REQUIRED: Buffers for OIDC Tokens
+        proxy_buffer_size          128k;
+        proxy_buffers              4 256k;
+        proxy_busy_buffers_size    256k;
+    }
+}
+```
+*Activate the config:* `sudo ln -s /etc/nginx/sites-available/door-controller /etc/nginx/sites-enabled/` and `sudo systemctl restart nginx`
+
+### 4. Enable Background Service
+This ensures the app starts automatically when the server reboots.
+
+```bash
+# Copy the service file
+sudo cp /opt/door-controller/door-controller.service /etc/systemd/system/
+
+# Start the service
+sudo systemctl daemon-reload
+sudo systemctl enable --now door-controller
+```
+
+### 5. Firewall Configuration
+Ensure the following ports are open:
+*   **TCP 80/443**: For the web interface.
+*   **UDP 60000**: For sending commands to controllers.
+*   **UDP 60001**: For receiving live events from controllers.
+
+---
+
+## 📖 Usage
+1.  **Scan**: Click "Start Scan" on the Dashboard to find hardware.
+2.  **Add**: Go to the "Controllers" tab and click "Add" on your devices.
+3.  **Name**: Click the **Gear Icon** to give your doors friendly names.
+4.  **Group**: Create a "Door Group" to manage multiple doors at once.
+
+## ⚖️ License
+Distributed under the MIT License. See `LICENSE` for more information.
