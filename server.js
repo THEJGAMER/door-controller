@@ -110,10 +110,10 @@ const oidcConfig = {
   },
   session: { 
     name: 'appSession', 
-    absoluteDuration: 3600, 
+    absoluteDuration: 7200, 
     rolling: true, 
-    rollingDuration: 900,
-    cookie: { secure: true, sameSite: 'Lax' } // Standard setting for query mode
+    rollingDuration: 3600,
+    cookie: { secure: true, sameSite: 'Lax' } 
   },
 };
 

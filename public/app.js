@@ -1,8 +1,10 @@
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('Door Control App v29 (Auto-Refresh Config) Initialized');
+    console.log('Door Control App v38 (Abort Controllers) Initialized');
 
     let groupSelect = null;
     let liveStatusTimer = null;
+    let currentAbortController = null;
+
     const state = {
         config: { controllers: [] },
         liveEvents: [],
@@ -10,12 +12,25 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const api = async (p, m = 'GET', b = null) => {
+        const signal = currentAbortController ? currentAbortController.signal : null;
         try {
-            const r = await fetch(p, { method: m, headers: { 'Content-Type': 'application/json' }, body: b ? JSON.stringify(b) : null });
+            const r = await fetch(p, { 
+                method: m, 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: b ? JSON.stringify(b) : null,
+                signal
+            });
             const d = await r.json();
             if (!r.ok) throw new Error(d.error || `Server error ${r.status}`);
             return d;
-        } catch (e) { console.error(`API Error [${m} ${p}]:`, e); throw e; }
+        } catch (e) {
+            if (e.name === 'AbortError') {
+                console.log(`Fetch Aborted: ${p}`);
+                return { aborted: true };
+            }
+            console.error(`API Error [${m} ${p}]:`, e);
+            throw e;
+        }
     };
 
     const showLoader = s => { const el = document.getElementById('loader'); if (el) el.style.display = s ? 'flex' : 'none'; };
@@ -23,7 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const getText = (val) => {
         if (!val) return '';
         let t = val;
-        if (typeof val === 'object') t = val.state || val.event || val.value || JSON.stringify(val);
+        if (typeof val === 'object') t = val.state || val.event || val.reason || val.value || JSON.stringify(val);
         return String(t).replace(/[{}]/g, '');
     };
 
@@ -50,6 +65,13 @@ document.addEventListener('DOMContentLoaded', () => {
         l.onclick = async (e) => {
             e.preventDefault();
             const t = l.dataset.tab;
+
+            if (currentAbortController) {
+                currentAbortController.abort();
+                console.log('Stopping background sync tasks...');
+            }
+            currentAbortController = new AbortController();
+
             document.querySelectorAll('#sidebar .nav-link').forEach(nav => nav.classList.remove('active'));
             l.classList.add('active');
             document.getElementById('view-title').textContent = t.charAt(0).toUpperCase() + t.slice(1);
@@ -67,14 +89,18 @@ document.addEventListener('DOMContentLoaded', () => {
             if (t === 'controllers') await window.refreshControllers();
             if (t === 'cards') await refreshCards();
             if (t === 'door-groups') await refreshDoorGroups();
-            if (t === 'debug') await refreshDebug();
             if (t === 'events') await refreshEvents();
+            if (t === 'debug') await refreshDebug();
             if (t === 'settings') await refreshSettings();
-        } catch (e) { alert(`Error loading ${t}: ` + e.message); } finally { showLoader(false); }
+        } catch (e) { 
+            if (e.name !== 'AbortError') alert(`Error loading ${t}: ` + e.message); 
+        } finally { showLoader(false); }
     };
 
     const refreshDash = async () => {
-        state.config = await api('/api/getConfig');
+        const res = await api('/api/getConfig');
+        if (res.aborted) return;
+        state.config = res;
         const el = document.getElementById('stat-controllers');
         if (el) el.textContent = state.config.controllers.length;
     };
@@ -82,8 +108,15 @@ document.addEventListener('DOMContentLoaded', () => {
     window.refreshControllers = async (scan = false) => {
         showLoader(true);
         let discovered = [];
-        if (scan) try { discovered = await api('/api/getDevices'); } catch(e) {}
-        state.config = await api('/api/getConfig');
+        if (scan) {
+            const dRes = await api('/api/getDevices');
+            if (dRes.aborted) return;
+            discovered = dRes;
+        }
+        const cRes = await api('/api/getConfig');
+        if (cRes.aborted) return;
+        state.config = cRes;
+        
         const map = new Map();
         state.config.controllers.forEach(c => map.set(Number(c.deviceId), { ...c, configured: true, offline: true }));
         discovered.forEach(d => {
@@ -99,7 +132,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const tr = document.createElement('tr');
             tr.innerHTML = `<td>${d.name||'Unnamed'}</td><td>${d.deviceId}</td><td>${d.address||'Auto'}</td><td>${d.doorCount||4}</td><td><span class="badge ${d.offline?'bg-secondary':'bg-success'}" id="status-${d.deviceId}">${d.offline?'Offline':'Online'}</span></td><td><div class="btn-group btn-group-sm"><button class="btn btn-primary" onclick="window.openDetails(${d.deviceId})">Details</button><button class="btn btn-warning" onclick="window.openDoor(${d.deviceId},1)">Unlock</button>${!d.configured?`<button class="btn btn-success" onclick="window.quickAdd(${d.deviceId},'${d.address}')">Add</button>`:`<button class="btn btn-danger" onclick="window.removeCtrl(${d.deviceId})">Del</button>`}</div></td>`;
             tbody.appendChild(tr);
-            if (d.configured && d.offline) api(`/api/testController/${d.deviceId}`).then(() => { 
+            if (d.configured && d.offline) api(`/api/testController/${d.deviceId}`).then((res) => { 
+                if (res && res.aborted) return;
                 const b = document.getElementById(`status-${d.deviceId}`);
                 if (b) { b.className = 'badge bg-success'; b.textContent = 'Online'; }
             }).catch(()=>{});
@@ -116,8 +150,6 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('details-title').textContent = `${c.name} (${id})`;
         const f = document.getElementById('form-det-gen');
         f.deviceId.value = id; f.name.value = c.name || ''; f.address.value = c.address || ''; f.doorCount.value = c.doorCount || 4; f.forceBroadcast.checked = !!c.forceBroadcast;
-        
-        // Also populate hidden IDs in other forms within the same modal
         modalEl.querySelectorAll('input[name="deviceId"]').forEach(inp => inp.value = id);
         
         document.getElementById('det-time').textContent = '...';
@@ -163,9 +195,10 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         const pollStatus = async () => {
-            if (!modalEl.classList.contains('show')) { clearInterval(liveStatusTimer); state.selectedId = null; return; }
+            if (!modalEl.classList.contains('show')) { clearInterval(liveStatusTimer); return; }
             try {
                 const r = await api(`/api/getStatus/${id}`);
+                if (r.aborted) return;
                 const s = r.state || {};
                 for (let i=1; i<=(c.doorCount||4); i++) { updateDoorUI(i, s.doors ? s.doors[i] : false, s.relays && s.relays.relays ? s.relays.relays[i] : false); }
             } catch (e) {}
@@ -175,10 +208,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (liveStatusTimer) clearInterval(liveStatusTimer);
         liveStatusTimer = setInterval(pollStatus, 5000);
 
-        api(`/api/getTime/${id}`).then(d => { if (document.getElementById('det-time')) document.getElementById('det-time').textContent = d.datetime; }).catch(() => {});
+        api(`/api/getTime/${id}`).then(d => { 
+            if (d && d.aborted) return;
+            if (document.getElementById('det-time')) document.getElementById('det-time').textContent = d.datetime; 
+        }).catch(() => {});
         window.fetchListener();
 
-        // Auto-refresh door configs
         for (let i=1; i<=(c.doorCount||4); i++) { window.checkDoor(id, i); }
     };
 
@@ -191,6 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.checkDoor = async (id, door) => { 
         try {
             const r = await api(`/api/getDoorControl/${id}/${door}`); 
+            if (r.aborted) return;
             const s = r.doorControlState || {};
             const ctrlText = getText(s.control);
             if (document.getElementById(`delay-${id}-${door}`)) document.getElementById(`delay-${id}-${door}`).value = s.delay;
@@ -205,56 +241,30 @@ document.addEventListener('DOMContentLoaded', () => {
     window.updateCtrlMeta = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.forceBroadcast = e.target.forceBroadcast.checked; await api('/api/updateController', 'POST', d); alert('Saved'); window.refreshControllers(); };
     window.syncTime = async () => { try { await api('/api/setTime', 'POST', { deviceId: state.selectedId, datetime: new Date().toISOString() }); alert('Synced'); } catch(e){ alert(e.message); } };
     window.setHardwareIP = async (e) => { 
-        e.preventDefault(); 
-        const fd = new FormData(e.target);
-        const d = Object.fromEntries(fd);
-        d.deviceId = d.deviceId || state.selectedId;
+        e.preventDefault(); const fd = new FormData(e.target); const d = Object.fromEntries(fd); d.deviceId = d.deviceId || state.selectedId;
         if (!d.deviceId || d.deviceId == '0') return alert('Invalid Controller ID');
-        console.log('Setting Hardware IP for:', d.deviceId);
-        try {
-            await api('/api/setIP', 'POST', d); 
-            alert('Hardware IP reconfiguration command sent'); 
-        } catch (e) { alert('Failed: ' + e.message); }
+        try { await api('/api/setIP', 'POST', d); alert('Hardware IP reconfiguration command sent'); } catch (e) { alert('Failed: ' + e.message); }
     };
-
     window.setListenerIP = async (e) => { 
-        e.preventDefault(); 
-        const fd = new FormData(e.target);
-        const d = Object.fromEntries(fd);
-        d.deviceId = d.deviceId || state.selectedId; 
+        e.preventDefault(); const fd = new FormData(e.target); const d = Object.fromEntries(fd); d.deviceId = d.deviceId || state.selectedId; 
         if (!d.deviceId || d.deviceId == '0') return alert('Invalid Controller ID');
-        console.log('Setting Listener for:', d.deviceId);
-        try {
-            await api('/api/setListener', 'POST', d); 
-            alert('Listener configuration updated on hardware'); 
-            window.fetchListener(); 
-        } catch (e) { alert('Failed to update listener: ' + e.message); }
+        try { await api('/api/setListener', 'POST', d); alert('Listener configuration updated on hardware'); window.fetchListener(); } catch (e) { alert('Failed to update listener: ' + e.message); }
     };
     window.fetchListener = async () => { 
         const el = document.getElementById('det-listener'); 
-        let id = state.selectedId;
-        if (!id) {
-            const idInp = document.querySelector('#modal-controller-details input[name="deviceId"]');
-            if (idInp) id = idInp.value;
-        }
+        let id = state.selectedId; if (!id) { const idInp = document.querySelector('#modal-controller-details input[name="deviceId"]'); if (idInp) id = idInp.value; }
         if (!el || !id) return;
         el.textContent = 'Loading...';
-        console.log('Fetching listener for:', id);
-        try { 
-            const d = await api(`/api/getListener/${id}`); 
-            console.log('Listener data:', d);
-            el.textContent = `${d.address}:${d.port}`; 
-        } catch (e) { 
-            console.error('Fetch listener failed:', e);
-            el.textContent = 'Error'; 
-        } 
+        try { const d = await api(`/api/getListener/${id}`); if (d.aborted) return; el.textContent = `${d.address}:${d.port}`; } catch (e) { el.textContent = 'Error'; } 
     };
     window.toggleSpec = async () => { await api('/api/recordSpecialEvents', 'POST', { deviceId: state.selectedId, enabled: true }); alert('Enabled'); };
     window.factoryReset = async () => { if (confirm('WIPE?')) await api('/api/restoreDefaultParameters', 'POST', { deviceId: state.selectedId }); };
 
     // Cards
     const refreshCards = async () => {
-        state.config = await api('/api/getConfig');
+        const res = await api('/api/getConfig');
+        if (res.aborted) return;
+        state.config = res;
         const s = document.getElementById('select-card-controller');
         if (!s) return;
         s.innerHTML = '<option value="">Select...</option>';
@@ -268,12 +278,15 @@ document.addEventListener('DOMContentLoaded', () => {
         tbody.innerHTML = id ? '<tr><td colspan="6" class="text-center">Loading...</td></tr>' : '';
         if (!id) return;
         try {
-            const { cards: count } = await api(`/api/getCards/${id}`);
-            if (document.getElementById('stat-cards')) document.getElementById('stat-cards').textContent = count;
+            const res = await api(`/api/getCards/${id}`);
+            if (res.aborted) return;
+            if (document.getElementById('stat-cards')) document.getElementById('stat-cards').textContent = res.cards;
             tbody.innerHTML = '';
-            for (let i=1; i<=Math.min(count, 50); i++) {
+            for (let i=1; i<=Math.min(res.cards, 50); i++) {
                 try {
-                    const { card: c } = await api(`/api/getCardByIndex/${id}/${i}`);
+                    const data = await api(`/api/getCardByIndex/${id}/${i}`);
+                    if (data.aborted) return;
+                    const c = data.card;
                     const tr = document.createElement('tr');
                     tr.innerHTML = `<td>${c.number}</td><td>${c.valid.from}</td><td>${c.valid.to}</td><td>${c.doors[1]},${c.doors[2]},${c.doors[3]},${c.doors[4]}</td><td>${c.PIN}</td><td><button class="btn btn-sm btn-danger" onclick="window.delCard(${id},${c.number})">Del</button></td>`;
                     tbody.appendChild(tr);
@@ -288,6 +301,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Door Groups
     const refreshDoorGroups = async () => {
         const groups = await api('/api/doorGroups');
+        if (groups.aborted) return;
         const tbody = document.getElementById('table-door-groups');
         if (tbody) {
             tbody.innerHTML = '';
@@ -303,6 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const refreshAssignments = async () => {
         const list = await api('/api/assignments');
+        if (list.aborted) return;
         const tbody = document.getElementById('table-assignments');
         if (!tbody) return;
         tbody.innerHTML = '';
@@ -335,7 +350,9 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.openAddGroupModal = async () => {
-        state.config = await api('/api/getConfig');
+        const res = await api('/api/getConfig');
+        if (res.aborted) return;
+        state.config = res;
         const container = document.getElementById('group-door-selector');
         if (!container) return;
         container.innerHTML = '';
@@ -372,6 +389,7 @@ document.addEventListener('DOMContentLoaded', () => {
         resEl.innerHTML = '<div class="alert alert-info">Provisioning site(s)... please wait.</div>';
         try {
             const res = await api('/api/provisionCard', 'POST', data);
+            if (res.aborted) return;
             let html = '<h6>Results:</h6><ul class="list-group">';
             res.results.forEach(r => { html += `<li class="list-group-item d-flex justify-content-between small">Group ${r.groupId} | CTRL ${r.deviceId}: ${r.success ? '<span class="text-success">SUCCESS</span>' : '<span class="text-danger">FAILED ('+r.error+')</span>'}</li>`; });
             html += '</ul>';
@@ -386,8 +404,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const s = document.getElementById('select-event-controller');
         if (!s) return;
         s.innerHTML = '<option value="all">All Controllers</option>';
+        const cRes = await api('/api/getConfig');
+        if (cRes.aborted) return;
+        state.config = cRes;
         state.config.controllers.forEach(c => s.add(new Option(c.name || `CTRL ${c.deviceId}`, c.deviceId)));
         const hist = await api('/api/eventHistory');
+        if (hist.aborted) return;
         renderHistory(hist);
         window.fetchControllerHistory();
     };
@@ -427,40 +449,36 @@ document.addEventListener('DOMContentLoaded', () => {
             for (const id of targets) {
                 try {
                     const meta = await api(`/api/getEvents/${id}`);
-                    // Only fetch the gap or last 20 if many missing
+                    if (meta.aborted) return;
                     for (let i=meta.last; i>=Math.max(meta.first, meta.last-20); i--) {
                         try { 
-                            const { event: e } = await api(`/api/getEvent/${id}/${i}`); 
+                            const res = await api(`/api/getEvent/${id}/${i}`); 
+                            if (res.aborted) return;
+                            const e = res.event;
                             allNewLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); 
                         } catch (ex){}
                     }
                 } catch (err) {}
             }
             if (allNewLogs.length > 0) { 
-                await api('/api/saveEvents', 'POST', allNewLogs); 
-                // Final render from DB to ensure unified view
+                const save = await api('/api/saveEvents', 'POST', allNewLogs); 
+                if (save && save.aborted) return;
                 const hist = await api('/api/eventHistory');
+                if (hist.aborted) return;
                 renderHistory(hist);
             }
         } finally { showLoader(false); }
     };
 
-
     // Debug
     const refreshDebug = async () => {
-        state.config = await api('/api/getConfig');
+        const res = await api('/api/getConfig');
+        if (res.aborted) return;
+        state.config = res;
         const s = document.getElementById('debug-controller');
         if (!s) return;
         s.innerHTML = '<option value="">(Network Broadcast)</option>';
         state.config.controllers.forEach(c => s.add(new Option(`${c.name || 'Unnamed'} (${c.deviceId})`, c.deviceId)));
-    };
-
-    // Settings
-    const refreshSettings = async () => {
-        state.config = await api('/api/getConfig');
-        const f = document.getElementById('form-settings');
-        if (!f) return;
-        f.bind.value = state.config.bind; f.broadcast.value = state.config.broadcast; f.listen.value = state.config.listen; f.timeout.value = state.config.timeout; f.debug.checked = !!state.config.debug;
     };
 
     window.onDebugCommandChange = (cmd) => {
@@ -487,11 +505,21 @@ document.addEventListener('DOMContentLoaded', () => {
         let url = `/api/${cmd}`; let method = 'GET'; let body = null;
         if (cmd === 'getDevices') { url = '/api/getDevices'; } else if (['getDevice', 'getStatus', 'getTime', 'getCards'].includes(cmd)) { if (!ctrlId) return alert('Select a controller'); url = `/api/${cmd}/${ctrlId}`; } else if (cmd === 'openDoor') { if (!ctrlId) return alert('Select a controller'); method = 'POST'; body = { deviceId: ctrlId, door: document.getElementById('dbg-door').value }; } else if (cmd === 'getDoorControl') { if (!ctrlId) return alert('Select a controller'); url = `/api/getDoorControl/${ctrlId}/${document.getElementById('dbg-door').value}`; } else if (cmd === 'setDoorControl') { if (!ctrlId) return alert('Select a controller'); method = 'POST'; body = { deviceId: ctrlId, door: document.getElementById('dbg-door').value, delay: document.getElementById('dbg-delay').value, control: document.getElementById('dbg-mode').value }; } else if (cmd === 'getCard') { if (!ctrlId) return alert('Select a controller'); url = `/api/getCard/${ctrlId}/${document.getElementById('dbg-card').value}`; } else if (cmd === 'getCardByIndex') { if (!ctrlId) return alert('Select a controller'); url = `/api/getCardByIndex/${ctrlId}/${document.getElementById('dbg-index').value}`; }
         log(`SENDING: ${method} ${url} ${body ? JSON.stringify(body) : ''}`, 'sent');
-        try { const res = await api(url, method, body); log(`RECEIVED: ${JSON.stringify(res, null, 2)}`); } catch (e) { log(`ERROR: ${e.message}`, 'error'); }
+        try { const res = await api(url, method, body); if (res && res.aborted) return; log(`RECEIVED: ${JSON.stringify(res, null, 2)}`); } catch (e) { log(`ERROR: ${e.message}`, 'error'); }
     };
 
+    // Settings
+    const refreshSettings = async () => {
+        const res = await api('/api/getConfig');
+        if (res.aborted) return;
+        state.config = res;
+        const f = document.getElementById('form-settings');
+        if (!f) return;
+        f.bind.value = state.config.bind; f.broadcast.value = state.config.broadcast; f.listen.value = state.config.listen; f.timeout.value = state.config.timeout; f.debug.checked = !!state.config.debug;
+    };
     window.saveSettings = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.debug = e.target.debug.checked; await api('/api/setConfig', 'POST', d); alert('Saved'); };
 
+    // Theme Management
     const themeToggle = document.getElementById('theme-toggle');
     const setTheme = (isDark) => {
         document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
@@ -502,35 +530,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme === 'dark');
 
-    // Real-time Events via Socket.io
-    const socket = io();
-    socket.on('doorEvent', (ev) => {
-        console.log('Real-time Event:', ev);
-        state.liveEvents.push(ev);
-        if (state.liveEvents.length > 50) state.liveEvents.shift();
-        
-        const stat = document.getElementById('stat-events');
-        if (stat) stat.textContent = state.liveEvents.length;
-        
-        const log = document.getElementById('events-log');
-        if (log) {
-            const div = document.createElement('div');
-            div.innerHTML = `[${ev.timestamp}] <span class="text-info">CTRL ${ev.deviceId}:</span> ${ev.granted?'GRANTED':'DENIED'} (${getText(ev.eventType||ev.type)}) Door ${ev.door||'-'}`;
-            log.insertBefore(div, log.firstChild);
-            if (log.children.length > 20) log.lastChild.remove();
-        }
-
-        // Instant UI update for open modal
-        window.updateActiveControllerUI(ev);
-    });
-
-    // Initial load of live events
-    fetch('/api/liveEvents').then(r => r.json()).then(evs => {
-        state.liveEvents = evs;
-        if (document.getElementById('stat-events')) document.getElementById('stat-events').textContent = evs.length;
-        const log = document.getElementById('events-log');
-        if (log) log.innerHTML = evs.slice(-20).reverse().map(e => `<div>[${e.timestamp}] <span class="text-info">CTRL ${e.deviceId}:</span> ${e.granted?'GRANTED':'DENIED'} (${getText(e.eventType||e.type)}) Door ${e.door||'-'}</div>`).join('');
-    });
+    setInterval(async () => {
+        try {
+            const res = await fetch('/api/liveEvents');
+            const evs = await res.json();
+            if (evs.length !== state.liveEvents.length) {
+                state.liveEvents = evs;
+                if (document.getElementById('stat-events')) document.getElementById('stat-events').textContent = evs.length;
+                const log = document.getElementById('events-log'); if (log) log.innerHTML = evs.slice(-20).reverse().map(e => `<div>[${e.timestamp}] <span class="text-info">CTRL ${e.deviceId}:</span> ${e.granted?'GRANTED':'DENIED'} (${getText(e.eventType||e.type)}) Door ${e.door||'-'}</div>`).join('');
+                const lastEv = evs[evs.length - 1];
+                window.updateActiveControllerUI(lastEv);
+            }
+        } catch(e){}
+    }, 2000);
 
     refreshDash();
 });
