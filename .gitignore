@@ -14,4 +14,4 @@ build/
 
 # OS Metadata
 .DS_Store
-Thumbs.db
+Thumbs.db*.db
