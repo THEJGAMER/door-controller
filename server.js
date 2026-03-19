@@ -5,54 +5,21 @@ const morgan = require('morgan');
 const uhppoted = require('uhppoted');
 const path = require('path');
 const Database = require('better-sqlite3');
+const http = require('http');
+const { Server } = require('socket.io');
 
 // --- DATABASE SETUP ---
 const db = new Database('/opt/door-controller/door-control.db');
 db.exec(`
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-  CREATE TABLE IF NOT EXISTS controllers (
-    deviceId INTEGER PRIMARY KEY,
-    address TEXT,
-    name TEXT,
-    doorCount INTEGER DEFAULT 4,
-    forceBroadcast INTEGER DEFAULT 0
-  );
-  CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    deviceId INTEGER,
-    cardNumber INTEGER,
-    door INTEGER,
-    granted INTEGER,
-    eventType TEXT,
-    reason TEXT
-  );
+  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE IF NOT EXISTS controllers (deviceId INTEGER PRIMARY KEY, address TEXT, name TEXT, doorCount INTEGER DEFAULT 4, forceBroadcast INTEGER DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, deviceId INTEGER, cardNumber INTEGER, door INTEGER, granted INTEGER, eventType TEXT, reason TEXT);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events (timestamp, deviceId, cardNumber, door, eventType);
-  
-  CREATE TABLE IF NOT EXISTS door_groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE
-  );
-  CREATE TABLE IF NOT EXISTS door_group_members (
-    groupId INTEGER,
-    deviceId INTEGER,
-    door INTEGER,
-    PRIMARY KEY(groupId, deviceId, door)
-  );
-  CREATE TABLE IF NOT EXISTS card_group_assignments (
-    cardNumber INTEGER,
-    groupId INTEGER,
-    pin INTEGER,
-    validFrom TEXT,
-    validTo TEXT,
-    PRIMARY KEY(cardNumber, groupId)
-  );
+  CREATE TABLE IF NOT EXISTS door_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE);
+  CREATE TABLE IF NOT EXISTS door_group_members (groupId INTEGER, deviceId INTEGER, door INTEGER, PRIMARY KEY(groupId, deviceId, door));
+  CREATE TABLE IF NOT EXISTS card_group_assignments (cardNumber INTEGER, groupId INTEGER, pin INTEGER, validFrom TEXT, validTo TEXT, PRIMARY KEY(cardNumber, groupId));
 `);
 
-// Helper to save event to DB (deduplicated)
 function saveEventToDb(ev) {
   try {
     const extractText = (v) => {
@@ -61,24 +28,11 @@ function saveEventToDb(ev) {
       if (typeof v === 'object') return (v.state || v.event || v.reason || v.value || JSON.stringify(v)).replace(/[{}]/g, '');
       return String(v);
     };
-
-    db.prepare(`
-      INSERT OR IGNORE INTO events 
-      (timestamp, deviceId, cardNumber, door, granted, eventType, reason) 
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      ev.timestamp || new Date().toISOString().replace('T', ' ').split('.')[0],
-      Number(ev.deviceId),
-      ev.cardNumber || ev.card || 0,
-      ev.door || 0,
-      ev.granted ? 1 : 0,
-      extractText(ev.eventType || ev.type || 'Access'),
-      extractText(ev.reason || '')
-    );
+    db.prepare('INSERT OR IGNORE INTO events (timestamp, deviceId, cardNumber, door, granted, eventType, reason) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(ev.timestamp || new Date().toISOString().replace('T', ' ').split('.')[0], Number(ev.deviceId), ev.cardNumber || ev.card || 0, ev.door || 0, ev.granted ? 1 : 0, extractText(ev.eventType || ev.type || 'Access'), extractText(ev.reason || ''));
   } catch (e) { console.error('DB Save Error', e); }
 }
 
-// Helper to get/set settings
 function getSetting(key, defaultValue) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : defaultValue;
@@ -87,7 +41,6 @@ function setSetting(key, value) {
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
 }
 
-// Initial Global Config from DB or Env
 const globalConfig = {
   bind: getSetting('bind', process.env.UHPPOTE_BIND || '0.0.0.0'),
   broadcast: getSetting('broadcast', process.env.UHPPOTE_BROADCAST || '192.168.0.255:60000'),
@@ -97,11 +50,13 @@ const globalConfig = {
 };
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 app.set('trust proxy', true);
 app.use(express.json());
 app.use(morgan('dev'));
 
-// OIDC configuration
 const oidcConfig = {
   authRequired: true,
   auth0Logout: false,
@@ -111,48 +66,23 @@ const oidcConfig = {
   clientID: process.env.OIDC_CLIENT_ID,
   issuerBaseURL: process.env.OIDC_ISSUER_URL,
   clientSecret: process.env.OIDC_CLIENT_SECRET,
-  authorizationParams: {
-    response_type: 'code',
-    response_mode: 'form_post',
-    scope: 'openid profile email',
-  },
-  session: {
-    name: 'appSession',
-    cookie: {
-      secure: true,
-      sameSite: 'Lax',
-    }
-  },
+  authorizationParams: { response_type: 'code', response_mode: 'form_post', scope: 'openid profile email' },
+  session: { name: 'appSession', cookie: { secure: true, sameSite: 'Lax' } },
 };
 
 app.use((req, res, next) => {
-  const skip = ['/favicon.ico', '/app.js', '/index.html'].some(p => req.path === p);
-  if (skip) return next();
+  if (['/favicon.ico', '/app.js', '/index.html'].some(p => req.path === p)) return next();
   auth(oidcConfig)(req, res, next);
 });
 
-// Setup UHPPOTE Configuration
 function getUhppoteConfig() {
   const savedControllers = db.prepare('SELECT * FROM controllers').all();
   const controllerList = savedControllers.map(c => {
-    const ctrl = {
-      deviceId: c.deviceId,
-      forceBroadcast: !!c.forceBroadcast
-    };
-    if (c.address && c.address.trim() !== '') {
-      ctrl.address = c.address.trim();
-    }
+    const ctrl = { deviceId: c.deviceId, forceBroadcast: !!c.forceBroadcast };
+    if (c.address && c.address.trim() !== '') ctrl.address = c.address.trim();
     return ctrl;
   });
-  return new uhppoted.Config(
-    'uhppoted',
-    globalConfig.bind,
-    globalConfig.broadcast,
-    globalConfig.listen,
-    globalConfig.timeout,
-    controllerList,
-    globalConfig.debug
-  );
+  return new uhppoted.Config('uhppoted', globalConfig.bind, globalConfig.broadcast, globalConfig.listen, globalConfig.timeout, controllerList, globalConfig.debug);
 }
 
 let ctx = { config: getUhppoteConfig(), logger: console.log };
@@ -167,13 +97,9 @@ const wrap = fn => async (req, res, next) => {
   }
 };
 
-// API: Config & Persistence
 app.get('/api/getConfig', (req, res) => {
   const ctrls = db.prepare('SELECT * FROM controllers').all();
-  res.json({
-    ...globalConfig,
-    controllers: ctrls
-  });
+  res.json({ ...globalConfig, controllers: ctrls });
 });
 
 app.post('/api/setConfig', (req, res) => {
@@ -183,7 +109,7 @@ app.post('/api/setConfig', (req, res) => {
   if (listen) { globalConfig.listen = listen; setSetting('listen', listen); }
   if (timeout) { globalConfig.timeout = parseInt(timeout); setSetting('timeout', timeout); }
   if (typeof debug !== 'undefined') { globalConfig.debug = Boolean(debug); setSetting('debug', debug); }
-  ctx.config = getUhppoteConfig(); // Refresh context
+  ctx.config = getUhppoteConfig();
   res.json({ success: true });
 });
 
@@ -191,7 +117,7 @@ app.post('/api/addDevice', wrap(async (req) => {
   const { deviceId, address, forceBroadcast, name, doorCount } = req.body;
   db.prepare('INSERT OR REPLACE INTO controllers (deviceId, address, forceBroadcast, name, doorCount) VALUES (?, ?, ?, ?, ?)')
     .run(Number(deviceId), address || '', forceBroadcast ? 1 : 0, name || `Controller ${deviceId}`, doorCount || 4);
-  ctx.config = getUhppoteConfig(); // Refresh context
+  ctx.config = getUhppoteConfig();
   return { success: true };
 }));
 
@@ -214,11 +140,7 @@ app.post('/api/removeDevice', wrap(async (req) => {
   return { success: true };
 }));
 
-app.get('/api/testController/:id', wrap(async (req) => {
-  return await uhppoted.getDevice(ctx, Number(req.params.id));
-}));
-
-// API: Standard UHPPOTE
+app.get('/api/testController/:id', wrap(async (req) => await uhppoted.getDevice(ctx, Number(req.params.id))));
 app.get('/api/getDevices', wrap(async () => await uhppoted.getDevices(ctx)));
 app.get('/api/getDevice/:id', wrap(async (req) => await uhppoted.getDevice(ctx, Number(req.params.id))));
 app.post('/api/setIP', wrap(async (req) => await uhppoted.setIP(ctx, Number(req.body.deviceId), req.body.address, req.body.netmask, req.body.gateway)));
@@ -230,7 +152,7 @@ app.post('/api/setDoorPasscodes', wrap(async (req) => await uhppoted.setDoorPass
 app.post('/api/setInterlock', wrap(async (req) => await uhppoted.setInterlock(ctx, Number(req.body.deviceId), Number(req.body.interlock))));
 app.post('/api/setPCControl', wrap(async (req) => await uhppoted.setPCControl(ctx, Number(req.body.deviceId), Boolean(req.body.enabled))));
 app.get('/api/getListener/:id', wrap(async (req) => await uhppoted.getListener(ctx, Number(req.params.id))));
-app.post('/api/setListener', wrap(async (req) => await uhppoted.setListener(ctx, Number(req.body.deviceId), req.body.address, Number(req.body.port))));
+app.post('/api/setListener', wrap(async (req) => await uhppoted.setListener(ctx, Number(req.body.deviceId), req.body.address, Number(req.body.port), 0)));
 app.post('/api/recordSpecialEvents', wrap(async (req) => await uhppoted.recordSpecialEvents(ctx, Number(req.body.deviceId), Boolean(req.body.enabled))));
 app.get('/api/getEvents/:id', wrap(async (req) => await uhppoted.getEvents(ctx, Number(req.params.id))));
 app.get('/api/getEvent/:id/:index', wrap(async (req) => await uhppoted.getEvent(ctx, Number(req.params.id), Number(req.params.index))));
@@ -246,18 +168,8 @@ app.get('/api/getCard/:id/:cardNumber', wrap(async (req) => await uhppoted.getCa
 app.get('/api/getCardByIndex/:id/:index', wrap(async (req) => await uhppoted.getCardByIndex(ctx, Number(req.params.id), Number(req.params.index))));
 app.post('/api/putCard', wrap(async (req) => {
   const { deviceId, cardNumber, from, to, door1, door2, door3, door4, pin } = req.body;
-  const mapPermission = (p) => {
-    const v = Number(p);
-    if (v === 0) return false;
-    if (v === 1) return true;
-    return v;
-  };
-  const doors = {
-    1: mapPermission(door1),
-    2: mapPermission(door2),
-    3: mapPermission(door3),
-    4: mapPermission(door4)
-  };
+  const mapPermission = (p) => { const v = Number(p); if (v === 0) return false; if (v === 1) return true; return v; };
+  const doors = { 1: mapPermission(door1), 2: mapPermission(door2), 3: mapPermission(door3), 4: mapPermission(door4) };
   return await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doors, Number(pin));
 }));
 app.post('/api/deleteCard', wrap(async (req) => await uhppoted.deleteCard(ctx, Number(req.body.deviceId), Number(req.body.cardNumber))));
@@ -265,123 +177,72 @@ app.post('/api/deleteCards', wrap(async (req) => await uhppoted.deleteCards(ctx,
 app.get('/api/getTimeProfile/:id/:profileId', wrap(async (req) => await uhppoted.getTimeProfile(ctx, Number(req.params.id), Number(req.params.profileId))));
 app.post('/api/setTimeProfile', wrap(async (req) => {
   const { deviceId, profileId, start, end, monday, tuesday, wednesday, thursday, friday, saturday, sunday, segment1start, segment1end, segment2start, segment2end, segment3start, segment3end, linkedProfileID } = req.body;
-  return await uhppoted.setTimeProfile(ctx, Number(deviceId), {
-    profileId: Number(profileId), start, end,
-    monday: Boolean(monday), tuesday: Boolean(tuesday), wednesday: Boolean(wednesday), thursday: Boolean(thursday), friday: Boolean(friday), saturday: Boolean(saturday), sunday: Boolean(sunday),
-    segment1start, segment1end, segment2start, segment2end, segment3start, segment3end,
-    linkedProfileID: Number(linkedProfileID)
-  });
+  return await uhppoted.setTimeProfile(ctx, Number(deviceId), { profileId: Number(profileId), start, end, monday: Boolean(monday), tuesday: Boolean(tuesday), wednesday: Boolean(wednesday), thursday: Boolean(thursday), friday: Boolean(friday), saturday: Boolean(saturday), sunday: Boolean(sunday), segment1start, segment1end, segment2start, segment2end, segment3start, segment3end, linkedProfileID: Number(linkedProfileID) });
 }));
 app.post('/api/clearTimeProfiles', wrap(async (req) => await uhppoted.clearTimeProfiles(ctx, Number(req.body.deviceId))));
 app.post('/api/clearTaskList', wrap(async (req) => await uhppoted.clearTaskList(ctx, Number(req.body.deviceId))));
 app.post('/api/addTask', wrap(async (req) => await uhppoted.addTask(ctx, Number(req.body.deviceId), req.body.task)));
 app.post('/api/refreshTaskList', wrap(async (req) => await uhppoted.refreshTaskList(ctx, Number(req.body.deviceId))));
 
-// API: Door Groups
 app.get('/api/doorGroups', (req, res) => {
-  const groups = db.prepare('SELECT * FROM door_groups').all();
-  const result = groups.map(g => {
-    const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(g.id);
-    return { ...g, members };
-  });
+  const result = db.prepare('SELECT * FROM door_groups').all().map(g => ({ ...g, members: db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(g.id) }));
   res.json(result);
 });
-
 app.post('/api/doorGroups', (req, res) => {
   const { name, members } = req.body;
-  const info = db.prepare('INSERT INTO door_groups (name) VALUES (?)').run(name);
-  const groupId = info.lastInsertRowid;
-  const insertMember = db.prepare('INSERT INTO door_group_members (groupId, deviceId, door) VALUES (?, ?, ?)');
-  for (const m of members) {
-    insertMember.run(groupId, Number(m.deviceId), Number(m.door));
-  }
+  const groupId = db.prepare('INSERT INTO door_groups (name) VALUES (?)').run(name).lastInsertRowid;
+  const insert = db.prepare('INSERT INTO door_group_members (groupId, deviceId, door) VALUES (?, ?, ?)');
+  for (const m of members) insert.run(groupId, Number(m.deviceId), Number(m.door));
   res.json({ success: true, id: groupId });
 });
-
 app.delete('/api/doorGroups/:id', (req, res) => {
   db.prepare('DELETE FROM door_groups WHERE id = ?').run(req.params.id);
   db.prepare('DELETE FROM door_group_members WHERE groupId = ?').run(req.params.id);
   res.json({ success: true });
 });
-
 app.post('/api/provisionCard', wrap(async (req) => {
   const { groupIds, cardNumber, from, to, pin } = req.body;
-  const targetGroups = Array.isArray(groupIds) ? groupIds : [groupIds];
+  const targets = Array.isArray(groupIds) ? groupIds : [groupIds];
   const results = [];
-
-  for (const groupId of targetGroups) {
+  for (const gid of targets) {
     db.prepare('INSERT OR REPLACE INTO card_group_assignments (cardNumber, groupId, pin, validFrom, validTo) VALUES (?, ?, ?, ?, ?)')
-      .run(Number(cardNumber), Number(groupId), Number(pin), from, to);
-
-    const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(groupId);
+      .run(Number(cardNumber), Number(gid), Number(pin), from, to);
+    const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(gid);
     const deviceDoors = {};
-    members.forEach(m => {
-      if (!deviceDoors[m.deviceId]) deviceDoors[m.deviceId] = [];
-      deviceDoors[m.deviceId].push(m.door);
-    });
-
-    for (const [deviceId, doors] of Object.entries(deviceDoors)) {
+    members.forEach(m => { if (!deviceDoors[m.deviceId]) deviceDoors[m.deviceId] = []; deviceDoors[m.deviceId].push(m.door); });
+    for (const [did, doors] of Object.entries(deviceDoors)) {
       const doorMap = { 1: false, 2: false, 3: false, 4: false };
       doors.forEach(d => doorMap[d] = true);
-      try {
-        await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doorMap, Number(pin));
-        results.push({ groupId, deviceId, success: true });
-      } catch (e) {
-        results.push({ groupId, deviceId, success: false, error: e.message });
-      }
+      try { await uhppoted.putCard(ctx, Number(did), Number(cardNumber), from, to, doorMap, Number(pin)); results.push({ groupId: gid, deviceId: did, success: true }); }
+      catch (e) { results.push({ groupId: gid, deviceId: did, success: false, error: e.message }); }
     }
   }
   return { results };
 }));
-
-app.get('/api/assignments', (req, res) => {
-  const rows = db.prepare(`
-    SELECT a.*, g.name as groupName 
-    FROM card_group_assignments a 
-    JOIN door_groups g ON a.groupId = g.id
-  `).all();
-  res.json(rows);
-});
-
+app.get('/api/assignments', (req, res) => res.json(db.prepare('SELECT a.*, g.name as groupName FROM card_group_assignments a JOIN door_groups g ON a.groupId = g.id').all()));
 app.post('/api/deprovisionCard', wrap(async (req) => {
   const { groupId, cardNumber } = req.body;
   const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(groupId);
-  const deviceIdList = [...new Set(members.map(m => m.deviceId))];
+  const ids = [...new Set(members.map(m => m.deviceId))];
   const results = [];
-  for (const deviceId of deviceIdList) {
-    try {
-      await uhppoted.deleteCard(ctx, Number(deviceId), Number(cardNumber));
-      results.push({ deviceId, success: true });
-    } catch (e) {
-      results.push({ deviceId, success: false, error: e.message });
-    }
+  for (const id of ids) {
+    try { await uhppoted.deleteCard(ctx, Number(id), Number(cardNumber)); results.push({ deviceId: id, success: true }); }
+    catch (e) { results.push({ deviceId: id, success: false, error: e.message }); }
   }
-  db.prepare('DELETE FROM card_group_assignments WHERE cardNumber = ? AND groupId = ?')
-    .run(Number(cardNumber), Number(groupId));
+  db.prepare('DELETE FROM card_group_assignments WHERE cardNumber = ? AND groupId = ?').run(Number(cardNumber), Number(groupId));
   return { results };
 }));
+app.post('/api/saveEvents', (req, res) => { (Array.isArray(req.body) ? req.body : [req.body]).forEach(saveEventToDb); res.json({ success: true }); });
 
-app.post('/api/saveEvents', (req, res) => {
-  const events = Array.isArray(req.body) ? req.body : [req.body];
-  events.forEach(saveEventToDb);
-  res.json({ success: true });
-});
-
-// Background Listen
 const liveEvents = [];
 app.get('/api/liveEvents', (req, res) => res.json(liveEvents));
-app.get('/api/eventHistory', (req, res) => {
-  const rows = db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 100').all();
-  res.json(rows);
-});
+app.get('/api/eventHistory', (req, res) => res.json(db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 100').all()));
 
 uhppoted.listen(ctx, (event) => {
-  console.log('[UDP EVENT]', JSON.stringify(event));
-  // Normalize event for frontend/DB
   const normalized = {
     deviceId: event.deviceId,
-    timestamp: event.timestamp,
-    door: event.door,
+    timestamp: event.timestamp || (event.state && event.state.event ? event.state.event.timestamp : new Date().toISOString().replace('T', ' ').split('.')[0]),
+    door: event.door || (event.state && event.state.event ? event.state.event.door : 0),
     eventType: event.eventType || (event.state && event.state.event ? event.state.event.type : 'status'),
     cardNumber: event.cardNumber || (event.state && event.state.event ? event.state.event.card : 0),
     granted: event.granted || (event.state && event.state.event ? event.state.event.granted : false),
@@ -389,19 +250,14 @@ uhppoted.listen(ctx, (event) => {
     doorStates: event.state ? event.state.doors : null,
     relayStates: (event.state && event.state.relays) ? event.state.relays.relays : null
   };
-
-  if (!normalized.timestamp && event.state && event.state.event) {
-    normalized.timestamp = event.state.event.timestamp;
-    normalized.door = event.state.event.door;
-  }
-
   liveEvents.push(normalized);
   if (liveEvents.length > 50) liveEvents.shift();
   saveEventToDb(normalized);
+  io.emit('doorEvent', normalized); // PUSH TO CLIENTS INSTANTLY
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('Door Control App v21 (Event-Driven Status) Initialized');
+    console.log('Door Control App v29 (Auto-Refresh Config) Initialized');
 
     let groupSelect = null;
     let liveStatusTimer = null;
@@ -27,7 +27,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return String(t).replace(/[{}]/g, '');
     };
 
-    // Global placeholder for live status updates from events
     window.updateActiveControllerUI = (event) => {};
 
     const initTomSelect = (groups = []) => {
@@ -68,8 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (t === 'controllers') await window.refreshControllers();
             if (t === 'cards') await refreshCards();
             if (t === 'door-groups') await refreshDoorGroups();
-            if (t === 'events') await refreshEvents();
             if (t === 'debug') await refreshDebug();
+            if (t === 'events') await refreshEvents();
             if (t === 'settings') await refreshSettings();
         } catch (e) { alert(`Error loading ${t}: ` + e.message); } finally { showLoader(false); }
     };
@@ -118,6 +117,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const f = document.getElementById('form-det-gen');
         f.deviceId.value = id; f.name.value = c.name || ''; f.address.value = c.address || ''; f.doorCount.value = c.doorCount || 4; f.forceBroadcast.checked = !!c.forceBroadcast;
         
+        // Also populate hidden IDs in other forms within the same modal
+        modalEl.querySelectorAll('input[name="deviceId"]').forEach(inp => inp.value = id);
+        
         document.getElementById('det-time').textContent = '...';
         const dl = document.getElementById('det-doors-list'); 
         if (dl) {
@@ -138,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
-        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        new bootstrap.Modal(modalEl).show();
         
         const updateDoorUI = (door, doorOpen, relayActive) => {
             const badgeContainer = document.getElementById(`door-status-badges-${id}-${door}`);
@@ -149,17 +151,11 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
         };
 
-        // Define the live listener for this specific controller
         window.updateActiveControllerUI = (ev) => {
             if (ev.deviceId == id) {
-                // 1. If we have full states (from a status packet), update everything
                 if (ev.doorStates && ev.relayStates) {
-                    for (let i=1; i<=(c.doorCount||4); i++) {
-                        updateDoorUI(i, ev.doorStates[i], ev.relayStates[i]);
-                    }
-                } 
-                // 2. Otherwise update the specific door mentioned in the event
-                else if (ev.door) {
+                    for (let i=1; i<=(c.doorCount||4); i++) { updateDoorUI(i, ev.doorStates[i], ev.relayStates[i]); }
+                } else if (ev.door) {
                     const relay = (ev.eventType === 'door' || ev.type === 'door') ? ev.granted : undefined;
                     updateDoorUI(ev.door, ev.doorOpen, relay !== undefined ? relay : false);
                 }
@@ -171,18 +167,19 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const r = await api(`/api/getStatus/${id}`);
                 const s = r.state || {};
-                for (let i=1; i<=(c.doorCount||4); i++) {
-                    updateDoorUI(i, s.doors ? s.doors[i] : false, s.relays && s.relays.relays ? s.relays.relays[i] : false);
-                }
+                for (let i=1; i<=(c.doorCount||4); i++) { updateDoorUI(i, s.doors ? s.doors[i] : false, s.relays && s.relays.relays ? s.relays.relays[i] : false); }
             } catch (e) {}
         };
 
         pollStatus(); 
         if (liveStatusTimer) clearInterval(liveStatusTimer);
-        liveStatusTimer = setInterval(pollStatus, 5000); // 5s fallback polling
+        liveStatusTimer = setInterval(pollStatus, 5000);
 
         api(`/api/getTime/${id}`).then(d => { if (document.getElementById('det-time')) document.getElementById('det-time').textContent = d.datetime; }).catch(() => {});
         window.fetchListener();
+
+        // Auto-refresh door configs
+        for (let i=1; i<=(c.doorCount||4); i++) { window.checkDoor(id, i); }
     };
 
     window.saveDoor = async (id, door) => {
@@ -196,11 +193,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const r = await api(`/api/getDoorControl/${id}/${door}`); 
             const s = r.doorControlState || {};
             const ctrlText = getText(s.control);
-            if (document.getElementById(`dinfo-${id}-${door}`)) document.getElementById(`dinfo-${id}-${door}`).textContent = `Current: ${s.delay}s, ${ctrlText}`; 
             if (document.getElementById(`delay-${id}-${door}`)) document.getElementById(`delay-${id}-${door}`).value = s.delay;
             const sel = document.getElementById(`mode-${id}-${door}`);
             if (sel) { for (let opt of sel.options) { if (opt.value === ctrlText || ctrlText.toLowerCase().includes(opt.value)) { sel.value = opt.value; break; } } }
-        } catch (e) { alert('Check failed: ' + e.message); }
+        } catch (e) {}
     };
 
     window.openDoor = async (id, d) => { if (confirm(`Unlock Door ${d}?`)) await api('/api/openDoor', 'POST', { deviceId: id, door: d }); };
@@ -208,9 +204,51 @@ document.addEventListener('DOMContentLoaded', () => {
     window.removeCtrl = async (id) => { if (confirm('Remove?')) { await api('/api/removeDevice', 'POST', { deviceId: id }); window.refreshControllers(); } };
     window.updateCtrlMeta = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.forceBroadcast = e.target.forceBroadcast.checked; await api('/api/updateController', 'POST', d); alert('Saved'); window.refreshControllers(); };
     window.syncTime = async () => { try { await api('/api/setTime', 'POST', { deviceId: state.selectedId, datetime: new Date().toISOString() }); alert('Synced'); } catch(e){ alert(e.message); } };
-    window.setHardwareIP = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.deviceId = state.selectedId; await api('/api/setIP', 'POST', d); alert('Request sent'); };
-    window.setListenerIP = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.deviceId = state.selectedId; await api('/api/setListener', 'POST', d); alert('Request sent'); window.fetchListener(); };
-    window.fetchListener = async () => { const el = document.getElementById('det-listener'); if (el && state.selectedId) { try { const d = await api(`/api/getListener/${state.selectedId}`); el.textContent = `${d.address}:${d.port}`; } catch (e) { el.textContent = 'Error'; } } };
+    window.setHardwareIP = async (e) => { 
+        e.preventDefault(); 
+        const fd = new FormData(e.target);
+        const d = Object.fromEntries(fd);
+        d.deviceId = d.deviceId || state.selectedId;
+        if (!d.deviceId || d.deviceId == '0') return alert('Invalid Controller ID');
+        console.log('Setting Hardware IP for:', d.deviceId);
+        try {
+            await api('/api/setIP', 'POST', d); 
+            alert('Hardware IP reconfiguration command sent'); 
+        } catch (e) { alert('Failed: ' + e.message); }
+    };
+
+    window.setListenerIP = async (e) => { 
+        e.preventDefault(); 
+        const fd = new FormData(e.target);
+        const d = Object.fromEntries(fd);
+        d.deviceId = d.deviceId || state.selectedId; 
+        if (!d.deviceId || d.deviceId == '0') return alert('Invalid Controller ID');
+        console.log('Setting Listener for:', d.deviceId);
+        try {
+            await api('/api/setListener', 'POST', d); 
+            alert('Listener configuration updated on hardware'); 
+            window.fetchListener(); 
+        } catch (e) { alert('Failed to update listener: ' + e.message); }
+    };
+    window.fetchListener = async () => { 
+        const el = document.getElementById('det-listener'); 
+        let id = state.selectedId;
+        if (!id) {
+            const idInp = document.querySelector('#modal-controller-details input[name="deviceId"]');
+            if (idInp) id = idInp.value;
+        }
+        if (!el || !id) return;
+        el.textContent = 'Loading...';
+        console.log('Fetching listener for:', id);
+        try { 
+            const d = await api(`/api/getListener/${id}`); 
+            console.log('Listener data:', d);
+            el.textContent = `${d.address}:${d.port}`; 
+        } catch (e) { 
+            console.error('Fetch listener failed:', e);
+            el.textContent = 'Error'; 
+        } 
+    };
     window.toggleSpec = async () => { await api('/api/recordSpecialEvents', 'POST', { deviceId: state.selectedId, enabled: true }); alert('Enabled'); };
     window.factoryReset = async () => { if (confirm('WIPE?')) await api('/api/restoreDefaultParameters', 'POST', { deviceId: state.selectedId }); };
 
@@ -349,13 +387,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!s) return;
         s.innerHTML = '<option value="all">All Controllers</option>';
         state.config.controllers.forEach(c => s.add(new Option(c.name || `CTRL ${c.deviceId}`, c.deviceId)));
-        
-        // Show current DB history first
         const hist = await api('/api/eventHistory');
         renderHistory(hist);
-
-        // Then automatically trigger a fresh fetch from hardware
-        console.log('Auto-fetching fresh logs...');
         window.fetchControllerHistory();
     };
     const renderHistory = (h) => {
@@ -367,62 +400,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const tr = document.createElement('tr');
             const rawType = getText(ev.eventType || ev.type);
             const rawReason = getText(ev.reason).toLowerCase();
-            
-            // Classify event
             let classification = 'Sensor';
             let badgeClass = 'bg-secondary';
             let icon = 'bi-door-closed';
-
-            const isSwipe = rawType.toLowerCase().includes('swipe') || 
-                           (ev.cardNumber > 100) || 
-                           rawReason.includes('card');
-
-            if (isSwipe) {
-                classification = 'Swipe';
-                badgeClass = ev.granted ? 'bg-success' : 'bg-danger';
-                icon = 'bi-person-vcard';
-            } else {
-                classification = 'Sensor';
-                badgeClass = 'bg-info';
-                icon = 'bi-broadcast';
-            }
-
+            const isSwipe = rawType.toLowerCase().includes('swipe') || (ev.cardNumber > 100) || rawReason.includes('card');
+            if (isSwipe) { classification = 'Swipe'; badgeClass = ev.granted ? 'bg-success' : 'bg-danger'; icon = 'bi-person-vcard'; } else { classification = 'Sensor'; badgeClass = 'bg-info'; icon = 'bi-broadcast'; }
             let resultHtml = `<span class="badge ${ev.granted?'bg-success':'bg-danger'} shadow-sm">${ev.granted?'GRANTED':'DENIED'}</span>`;
             if (classification === 'Sensor') {
                 const isLock = rawReason.includes('lock') || rawReason.includes('relay') || rawReason.includes('unlocked');
                 const isOpen = rawReason.includes('opened') || rawReason.includes('open');
                 const isClosed = rawReason.includes('closed');
-
-                if (isLock) {
-                    resultHtml = `<span class="badge ${ev.granted || rawReason.includes('unlocked') ? 'bg-danger' : 'bg-success'} shadow-sm">${(ev.granted || rawReason.includes('unlocked')) ? 'UNLOCKED' : 'LOCKED'}</span>`;
-                } else if (isOpen) {
-                    resultHtml = `<span class="badge bg-warning text-dark shadow-sm">OPEN</span>`;
-                } else if (isClosed) {
-                    resultHtml = `<span class="badge bg-info shadow-sm">CLOSED</span>`;
-                }
+                if (isLock) { resultHtml = `<span class="badge ${ev.granted || rawReason.includes('unlocked') ? 'bg-danger' : 'bg-success'} shadow-sm">${(ev.granted || rawReason.includes('unlocked')) ? 'UNLOCKED' : 'LOCKED'}</span>`; } else if (isOpen) { resultHtml = `<span class="badge bg-warning text-dark shadow-sm">OPEN</span>`; } else if (isClosed) { resultHtml = `<span class="badge bg-info shadow-sm">CLOSED</span>`; }
             }
-
             const cleanReason = getText(ev.reason).replace(/[{}]/g, '').toUpperCase();
             const reasonCode = (ev.reason && ev.reason.code) ? ev.reason.code : (ev.type && ev.type.code ? ev.type.code : '-');
-
-            tr.innerHTML = `
-                <td><small class="text-muted fw-bold">${ev.timestamp}</small></td>
-                <td>
-                    <div class="d-flex align-items-center">
-                        <span class="badge ${badgeClass} me-2"><i class="bi ${icon} me-1"></i> ${classification}</span>
-                        <span class="badge bg-dark-subtle text-muted border" style="font-size:0.6rem">CODE ${reasonCode}</span>
-                    </div>
-                    <small class="text-secondary d-block mt-1" style="font-size:0.7rem">${rawType}</small>
-                </td>
-                <td><span class="font-monospace">${ev.cardNumber || '-'}</span></td>
-                <td><span class="badge bg-light text-dark border">D${ev.door}</span> <small class="text-muted">ID:${ev.deviceId}</small></td>
-                <td>
-                    <div class="d-flex flex-column align-items-start">
-                        ${resultHtml}
-                        <small class="text-uppercase fw-bold text-muted mt-1" style="font-size:0.65rem"><i class="bi bi-info-circle me-1"></i>${cleanReason}</small>
-                    </div>
-                </td>
-            `;
+            tr.innerHTML = `<td><small class="text-muted fw-bold">${ev.timestamp}</small></td><td><div class="d-flex align-items-center"><span class="badge ${badgeClass} me-2"><i class="bi ${icon} me-1"></i> ${classification}</span><span class="badge bg-dark-subtle text-muted border" style="font-size:0.6rem">CODE ${reasonCode}</span></div><small class="text-secondary d-block mt-1" style="font-size:0.7rem">${rawType}</small></td><td><span class="font-monospace">${ev.cardNumber || '-'}</span></td><td><span class="badge bg-light text-dark border">D${ev.door}</span> <small class="text-muted">ID:${ev.deviceId}</small></td><td><div class="d-flex flex-column align-items-start">${resultHtml}<small class="text-uppercase fw-bold text-muted mt-1" style="font-size:0.65rem"><i class="bi bi-info-circle me-1"></i>${cleanReason}</small></div></td>`;
             tbody.appendChild(tr);
         });
     };
@@ -436,31 +428,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     const meta = await api(`/api/getEvents/${id}`);
                     for (let i=meta.last; i>=Math.max(meta.first, meta.last-20); i--) {
-                        try { 
-                            const { event: e } = await api(`/api/getEvent/${id}/${i}`); 
-                            allLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); 
-                        } catch (ex){}
+                        try { const { event: e } = await api(`/api/getEvent/${id}/${i}`); allLogs.push({ deviceId: id, timestamp: e.timestamp, eventType: e.type, cardNumber: e.card, door: e.door, granted: e.granted, reason: e.reason }); } catch (ex){}
                     }
                 } catch (err) {}
             }
-            
-            // Persist the fetched events to the DB
-            if (allLogs.length > 0) {
-                await api('/api/saveEvents', 'POST', allLogs);
-            }
-
+            if (allLogs.length > 0) { await api('/api/saveEvents', 'POST', allLogs); }
             renderHistory(allLogs);
         } finally { showLoader(false); }
-    };
-
-
-    // Debug
-    const refreshDebug = async () => {
-        state.config = await api('/api/getConfig');
-        const s = document.getElementById('debug-controller');
-        if (!s) return;
-        s.innerHTML = '<option value="">(Network Broadcast)</option>';
-        state.config.controllers.forEach(c => s.add(new Option(`${c.name || 'Unnamed'} (${c.deviceId})`, c.deviceId)));
     };
 
     window.onDebugCommandChange = (cmd) => {
@@ -490,16 +464,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try { const res = await api(url, method, body); log(`RECEIVED: ${JSON.stringify(res, null, 2)}`); } catch (e) { log(`ERROR: ${e.message}`, 'error'); }
     };
 
-    // Settings
-    const refreshSettings = async () => {
-        state.config = await api('/api/getConfig');
-        const f = document.getElementById('form-settings');
-        if (!f) return;
-        f.bind.value = state.config.bind; f.broadcast.value = state.config.broadcast; f.listen.value = state.config.listen; f.timeout.value = state.config.timeout; f.debug.checked = !!state.config.debug;
-    };
     window.saveSettings = async (e) => { e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); d.debug = e.target.debug.checked; await api('/api/setConfig', 'POST', d); alert('Saved'); };
 
-    // Theme Management
     const themeToggle = document.getElementById('theme-toggle');
     const setTheme = (isDark) => {
         document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
@@ -510,20 +476,35 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme === 'dark');
 
-    setInterval(async () => {
-        try {
-            const res = await fetch('/api/liveEvents');
-            const evs = await res.json();
-            if (evs.length !== state.liveEvents.length) {
-                state.liveEvents = evs;
-                const stat = document.getElementById('stat-events'); if (stat) stat.textContent = evs.length;
-                const log = document.getElementById('events-log'); if (log) log.innerHTML = evs.slice(-20).reverse().map(e => `<div>[${e.timestamp}] <span class="text-info">CTRL ${e.deviceId}:</span> ${e.granted?'GRANTED':'DENIED'} (${getText(e.eventType||e.type)}) Door ${e.door||'-'}</div>`).join('');
-                
-                const lastEv = evs[evs.length - 1];
-                window.updateActiveControllerUI(lastEv);
-            }
-        } catch(e){}
-    }, 2000);
+    // Real-time Events via Socket.io
+    const socket = io();
+    socket.on('doorEvent', (ev) => {
+        console.log('Real-time Event:', ev);
+        state.liveEvents.push(ev);
+        if (state.liveEvents.length > 50) state.liveEvents.shift();
+        
+        const stat = document.getElementById('stat-events');
+        if (stat) stat.textContent = state.liveEvents.length;
+        
+        const log = document.getElementById('events-log');
+        if (log) {
+            const div = document.createElement('div');
+            div.innerHTML = `[${ev.timestamp}] <span class="text-info">CTRL ${ev.deviceId}:</span> ${ev.granted?'GRANTED':'DENIED'} (${getText(ev.eventType||ev.type)}) Door ${ev.door||'-'}`;
+            log.insertBefore(div, log.firstChild);
+            if (log.children.length > 20) log.lastChild.remove();
+        }
+
+        // Instant UI update for open modal
+        window.updateActiveControllerUI(ev);
+    });
+
+    // Initial load of live events
+    fetch('/api/liveEvents').then(r => r.json()).then(evs => {
+        state.liveEvents = evs;
+        if (document.getElementById('stat-events')) document.getElementById('stat-events').textContent = evs.length;
+        const log = document.getElementById('events-log');
+        if (log) log.innerHTML = evs.slice(-20).reverse().map(e => `<div>[${e.timestamp}] <span class="text-info">CTRL ${e.deviceId}:</span> ${e.granted?'GRANTED':'DENIED'} (${getText(e.eventType||e.type)}) Door ${e.door||'-'}</div>`).join('');
+    });
 
     refreshDash();
 });
