@@ -18,7 +18,30 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS door_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE);
   CREATE TABLE IF NOT EXISTS door_group_members (groupId INTEGER, deviceId INTEGER, door INTEGER, PRIMARY KEY(groupId, deviceId, door));
   CREATE TABLE IF NOT EXISTS card_group_assignments (cardNumber INTEGER, groupId INTEGER, pin INTEGER, validFrom TEXT, validTo TEXT, PRIMARY KEY(cardNumber, groupId));
+  CREATE TABLE IF NOT EXISTS logout_tokens (sid TEXT PRIMARY KEY, expiresAt INTEGER);
 `);
+
+const logoutStore = {
+  get: (sid, cb) => {
+    try {
+      const row = db.prepare('SELECT sid FROM logout_tokens WHERE sid = ? AND expiresAt > ?').get(sid, Date.now());
+      cb(null, row ? { sid: row.sid } : null);
+    } catch (err) { cb(err); }
+  },
+  set: (sid, val, cb) => {
+    try {
+      const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
+      db.prepare('INSERT OR REPLACE INTO logout_tokens (sid, expiresAt) VALUES (?, ?)').run(sid, expiresAt);
+      cb(null);
+    } catch (err) { cb(err); }
+  },
+  destroy: (sid, cb) => {
+    try {
+      db.prepare('DELETE FROM logout_tokens WHERE sid = ?').run(sid);
+      cb(null);
+    } catch (err) { cb(err); }
+  }
+};
 
 function saveEventToDb(ev) {
   try {
@@ -28,8 +51,7 @@ function saveEventToDb(ev) {
       if (typeof v === 'object') return (v.state || v.event || v.reason || v.value || JSON.stringify(v)).replace(/[{}]/g, '');
       return String(v);
     };
-    db.prepare('INSERT OR IGNORE INTO events (timestamp, deviceId, cardNumber, door, granted, eventType, reason) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(ev.timestamp || new Date().toISOString().replace('T', ' ').split('.')[0], Number(ev.deviceId), ev.cardNumber || ev.card || 0, ev.door || 0, ev.granted ? 1 : 0, extractText(ev.eventType || ev.type || 'Access'), extractText(ev.reason || ''));
+    db.prepare('INSERT OR IGNORE INTO events (timestamp, deviceId, cardNumber, door, granted, eventType, reason) VALUES (?, ?, ?, ?, ?, ?, ?)').run(ev.timestamp || new Date().toISOString().replace('T', ' ').split('.')[0], Number(ev.deviceId), ev.cardNumber || ev.card || 0, ev.door || 0, ev.granted ? 1 : 0, extractText(ev.eventType || ev.type || 'Access'), extractText(ev.reason || ''));
   } catch (e) { console.error('DB Save Error', e); }
 }
 
@@ -57,30 +79,45 @@ app.set('trust proxy', true);
 app.use(express.json());
 app.use(morgan('dev'));
 
+// Header cleaning middleware to prevent CSP conflicts
+app.use((req, res, next) => {
+  res.removeHeader('Content-Security-Policy');
+  res.removeHeader('X-Content-Security-Policy');
+  res.removeHeader('X-WebKit-CSP');
+  // Set a very permissive CSP to ensure OIDC redirects and Cloudflare beacons are never blocked
+  res.setHeader('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;");
+  next();
+});
+
+// Static files bypass BEFORE auth
+app.get('/favicon.ico', (req, res) => res.sendFile(path.join(__dirname, 'public', 'favicon.ico')));
+app.get('/app.js', (req, res) => res.sendFile(path.join(__dirname, 'public', 'app.js')));
+
 const oidcConfig = {
   authRequired: true,
   auth0Logout: false,
   idpLogout: true,
-  backchannelLogout: true,
+  backchannelLogout: { store: logoutStore },
   secret: process.env.OIDC_SECRET,
   baseURL: process.env.BASE_URL,
   clientID: process.env.OIDC_CLIENT_ID,
   issuerBaseURL: process.env.OIDC_ISSUER_URL,
   clientSecret: process.env.OIDC_CLIENT_SECRET,
-  authorizationParams: { response_type: 'code', response_mode: 'form_post', scope: 'openid profile email' },
+  authorizationParams: { 
+    response_type: 'code', 
+    response_mode: 'query', // Switch to GET redirects for maximum compatibility
+    scope: 'openid profile email' 
+  },
   session: { 
     name: 'appSession', 
     absoluteDuration: 3600, 
     rolling: true, 
     rollingDuration: 900,
-    cookie: { secure: true, sameSite: 'Lax' } 
+    cookie: { secure: true, sameSite: 'Lax' } // Standard setting for query mode
   },
 };
 
-app.use((req, res, next) => {
-  if (['/favicon.ico', '/app.js', '/index.html'].some(p => req.path === p)) return next();
-  auth(oidcConfig)(req, res, next);
-});
+app.use(auth(oidcConfig));
 
 app.use(async (req, res, next) => {
   if (req.oidc && req.oidc.isAuthenticated()) {
@@ -90,9 +127,7 @@ app.use(async (req, res, next) => {
         await req.oidc.fetchUserInfo();
         req.appSession.lastSync = Date.now();
       }
-    } catch (e) {
-      return res.redirect('/logout');
-    }
+    } catch (e) { return res.redirect('/logout'); }
   }
   next();
 });
@@ -119,11 +154,7 @@ const wrap = fn => async (req, res, next) => {
   }
 };
 
-app.get('/api/getConfig', (req, res) => {
-  const ctrls = db.prepare('SELECT * FROM controllers').all();
-  res.json({ ...globalConfig, controllers: ctrls });
-});
-
+app.get('/api/getConfig', (req, res) => res.json({ ...globalConfig, controllers: db.prepare('SELECT * FROM controllers').all() }));
 app.post('/api/setConfig', (req, res) => {
   const { bind, broadcast, listen, timeout, debug } = req.body;
   if (bind) { globalConfig.bind = bind; setSetting('bind', bind); }
@@ -151,11 +182,7 @@ app.post('/api/updateController', wrap(async (req) => {
   return { success: true };
 }));
 
-app.post('/api/setDoorControl', wrap(async (req) => {
-  const { deviceId, door, control, delay } = req.body;
-  return await uhppoted.setDoorControl(ctx, Number(deviceId), Number(door), Number(delay), control);
-}));
-
+app.post('/api/setDoorControl', wrap(async (req) => await uhppoted.setDoorControl(ctx, Number(req.body.deviceId), Number(req.body.door), Number(req.body.delay), req.body.control)));
 app.post('/api/removeDevice', wrap(async (req) => {
   db.prepare('DELETE FROM controllers WHERE deviceId = ?').run(Number(req.body.deviceId));
   ctx.config = getUhppoteConfig();
@@ -191,8 +218,7 @@ app.get('/api/getCardByIndex/:id/:index', wrap(async (req) => await uhppoted.get
 app.post('/api/putCard', wrap(async (req) => {
   const { deviceId, cardNumber, from, to, door1, door2, door3, door4, pin } = req.body;
   const mapPermission = (p) => { const v = Number(p); if (v === 0) return false; if (v === 1) return true; return v; };
-  const doors = { 1: mapPermission(door1), 2: mapPermission(door2), 3: mapPermission(door3), 4: mapPermission(door4) };
-  return await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, doors, Number(pin));
+  return await uhppoted.putCard(ctx, Number(deviceId), Number(cardNumber), from, to, { 1: mapPermission(door1), 2: mapPermission(door2), 3: mapPermission(door3), 4: mapPermission(door4) }, Number(pin));
 }));
 app.post('/api/deleteCard', wrap(async (req) => await uhppoted.deleteCard(ctx, Number(req.body.deviceId), Number(req.body.cardNumber))));
 app.post('/api/deleteCards', wrap(async (req) => await uhppoted.deleteCards(ctx, Number(req.body.deviceId))));
@@ -206,10 +232,7 @@ app.post('/api/clearTaskList', wrap(async (req) => await uhppoted.clearTaskList(
 app.post('/api/addTask', wrap(async (req) => await uhppoted.addTask(ctx, Number(req.body.deviceId), req.body.task)));
 app.post('/api/refreshTaskList', wrap(async (req) => await uhppoted.refreshTaskList(ctx, Number(req.body.deviceId))));
 
-app.get('/api/doorGroups', (req, res) => {
-  const result = db.prepare('SELECT * FROM door_groups').all().map(g => ({ ...g, members: db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(g.id) }));
-  res.json(result);
-});
+app.get('/api/doorGroups', (req, res) => res.json(db.prepare('SELECT * FROM door_groups').all().map(g => ({ ...g, members: db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(g.id) }))));
 app.post('/api/doorGroups', (req, res) => {
   const { name, members } = req.body;
   const groupId = db.prepare('INSERT INTO door_groups (name) VALUES (?)').run(name).lastInsertRowid;
@@ -227,8 +250,7 @@ app.post('/api/provisionCard', wrap(async (req) => {
   const targets = Array.isArray(groupIds) ? groupIds : [groupIds];
   const results = [];
   for (const gid of targets) {
-    db.prepare('INSERT OR REPLACE INTO card_group_assignments (cardNumber, groupId, pin, validFrom, validTo) VALUES (?, ?, ?, ?, ?)')
-      .run(Number(cardNumber), Number(gid), Number(pin), from, to);
+    db.prepare('INSERT OR REPLACE INTO card_group_assignments (cardNumber, groupId, pin, validFrom, validTo) VALUES (?, ?, ?, ?, ?)').run(Number(cardNumber), Number(gid), Number(pin), from, to);
     const members = db.prepare('SELECT * FROM door_group_members WHERE groupId = ?').all(gid);
     const deviceDoors = {};
     members.forEach(m => { if (!deviceDoors[m.deviceId]) deviceDoors[m.deviceId] = []; deviceDoors[m.deviceId].push(m.door); });
@@ -275,7 +297,7 @@ uhppoted.listen(ctx, (event) => {
   liveEvents.push(normalized);
   if (liveEvents.length > 50) liveEvents.shift();
   saveEventToDb(normalized);
-  io.emit('doorEvent', normalized); // PUSH TO CLIENTS INSTANTLY
+  io.emit('doorEvent', normalized);
 });
 
 app.use(express.static(path.join(__dirname, 'public')));

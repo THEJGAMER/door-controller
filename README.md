@@ -56,7 +56,8 @@ For the authentication to function correctly, your OIDC client must be configure
 *   **Valid Redirect URIs**: `https://your-domain.com/callback` (Must be absolute).
 *   **Valid Post Logout Redirect URIs**: `https://your-domain.com/`
 *   **Web Origins**: `https://your-domain.com` (Required for CORS/WebSockets).
-*   **Back-Channel Logout URL**: `https://your-domain.com/backchannel-logout` (If using the OIDC library's native handler).
+*   **Back-Channel Logout URL**: `https://your-domain.com/backchannel-logout`
+*   **Back-Channel Logout Session Required**: `On`
 *   **Advanced Settings**:
     *   **Response Mode**: `form_post` (This is required for large token payloads behind Nginx/Cloudflare).
 
