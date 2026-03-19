@@ -502,5 +502,21 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch(e){}
     }, 2000);
 
+    // Theme Management
+    const themeToggle = document.getElementById('theme-toggle');
+    const setTheme = (isDark) => {
+        document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
+        localStorage.setItem('theme', isDark ? 'dark' : 'light');
+        if (themeToggle) themeToggle.checked = isDark;
+    };
+
+    if (themeToggle) {
+        themeToggle.onchange = (e) => setTheme(e.target.checked);
+    }
+
+    // Initialize Theme
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    setTheme(savedTheme === 'dark');
+
     refreshDash();
 });
