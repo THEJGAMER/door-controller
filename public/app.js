@@ -437,6 +437,23 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally { showLoader(false); }
     };
 
+    // Debug
+    const refreshDebug = async () => {
+        state.config = await api('/api/getConfig');
+        const s = document.getElementById('debug-controller');
+        if (!s) return;
+        s.innerHTML = '<option value="">(Network Broadcast)</option>';
+        state.config.controllers.forEach(c => s.add(new Option(`${c.name || 'Unnamed'} (${c.deviceId})`, c.deviceId)));
+    };
+
+    // Settings
+    const refreshSettings = async () => {
+        state.config = await api('/api/getConfig');
+        const f = document.getElementById('form-settings');
+        if (!f) return;
+        f.bind.value = state.config.bind; f.broadcast.value = state.config.broadcast; f.listen.value = state.config.listen; f.timeout.value = state.config.timeout; f.debug.checked = !!state.config.debug;
+    };
+
     window.onDebugCommandChange = (cmd) => {
         const p = document.getElementById('debug-params');
         p.innerHTML = '';
